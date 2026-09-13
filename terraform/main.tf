@@ -23,6 +23,10 @@ locals {
     "run.googleapis.com",
     "sts.googleapis.com",
   ]
+
+  # El owner sale del mismo dato que el repo, así no hay dos fuentes de verdad
+  # que puedan quedar desalineadas.
+  github_owner = split("/", var.github_repository)[0]
 }
 
 resource "google_project_service" "required" {
@@ -136,21 +140,27 @@ resource "google_iam_workload_identity_pool" "github" {
 }
 
 resource "google_iam_workload_identity_pool_provider" "github" {
+  #checkov:skip=CKV_GCP_125:La condición restringe por repositorio exacto Y por owner, pero el valor viene de var.github_repository, que no tiene default. Checkov no puede resolverlo en tiempo de análisis y por eso no puede probar que el control existe. Verificable en el plan y en la consola de IAM.
   project                            = var.project_id
   workload_identity_pool_id          = google_iam_workload_identity_pool.github.workload_identity_pool_id
   workload_identity_pool_provider_id = "github-actions-provider"
   display_name                       = "GitHub Actions OIDC"
 
   attribute_mapping = {
-    "google.subject"       = "assertion.sub"
-    "attribute.repository" = "assertion.repository"
-    "attribute.ref"        = "assertion.ref"
+    "google.subject"             = "assertion.sub"
+    "attribute.repository"       = "assertion.repository"
+    "attribute.repository_owner" = "assertion.repository_owner"
+    "attribute.ref"              = "assertion.ref"
   }
 
   # Sin esta condición, CUALQUIER repositorio de GitHub del mundo podría
   # cambiar su token OIDC por credenciales de este proyecto. Es la línea que
   # separa federación de puerta abierta.
-  attribute_condition = "assertion.repository == \"${var.github_repository}\""
+  #
+  # Se piden las dos afirmaciones, no una: `repository` sola alcanzaría, pero
+  # atar también el owner cuesta nada y cierra la variante en la que alguien
+  # crea un repositorio con el mismo nombre bajo otra cuenta.
+  attribute_condition = "assertion.repository == \"${var.github_repository}\" && assertion.repository_owner == \"${local.github_owner}\""
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"

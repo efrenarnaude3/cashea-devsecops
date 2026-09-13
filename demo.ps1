@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Heimdall — driver del demo en Windows.
 
@@ -56,6 +56,21 @@ function Write-Err([string]$text) { Write-Host "  XX  $text" -ForegroundColor Re
 function Assert-Tool([string]$name, [string]$hint) {
     if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
         throw "Falta '$name' en el PATH. $hint"
+    }
+}
+
+function Assert-Cluster {
+    # Sin clúster, kubectl cae al default http://localhost:8080 y devuelve un
+    # error de conexión rechazada que no dice lo único que hace falta saber:
+    # que todavía no corriste `up`.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    kubectl cluster-info --request-timeout=5s 2>&1 | Out-Null
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $previous
+
+    if ($code -ne 0) {
+        throw "No hay ningún clúster respondiendo. Corré primero: .\demo.ps1 up -Owner $script:Owner"
     }
 }
 
@@ -150,7 +165,8 @@ function Invoke-Up {
 
 function Invoke-Policy {
     Write-Step 'Aplicando la política de admisión'
-    Assert-Tool 'kubectl' 'choco install kubernetes-cli'
+    Assert-Tool 'kubectl' 'winget install Kubernetes.kubectl'
+    Assert-Cluster
     $ownerValue = Resolve-Owner
 
     $file = New-RenderedFile 'policy\verify-image-signature.yaml' @{
@@ -165,7 +181,8 @@ function Invoke-Policy {
 
 function Invoke-Deploy {
     Write-Step 'Desplegando la imagen firmada'
-    Assert-Tool 'kubectl' 'choco install kubernetes-cli'
+    Assert-Tool 'kubectl' 'winget install Kubernetes.kubectl'
+    Assert-Cluster
     $imageValue = Resolve-Image
     Write-Host "  Imagen: $imageValue"
 
@@ -186,7 +203,8 @@ function Invoke-Deploy {
 
 function Invoke-Deny {
     Write-Step 'Intentando desplegar una imagen que el pipeline no produjo'
-    Assert-Tool 'kubectl' 'choco install kubernetes-cli'
+    Assert-Tool 'kubectl' 'winget install Kubernetes.kubectl'
+    Assert-Cluster
     Write-Host '  Imagen: docker.io/library/nginx:1.27-alpine (legítima, pero de otro registry)'
     Write-Host ''
 

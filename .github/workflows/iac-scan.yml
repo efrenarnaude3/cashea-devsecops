@@ -55,38 +55,39 @@ jobs:
         id: checkov
         continue-on-error: true
         run: |
-          # --output-file-path espera un DIRECTORIO para las salidas a archivo;
-          # checkov escribe results_sarif.sarif adentro.
+          # --output-file-path lleva una RUTA DE ARCHIVO por cada --output, en
+          # el mismo orden. Si se le pasa un directorio, Checkov intenta
+          # abrirlo como archivo y muere con IsADirectoryError.
           #
           # No uso --soft-fail-on por severidad: las severidades vienen de la
           # plataforma de Prisma Cloud, así que sin API key no matchean nada y
-          # el flag daría una falsa sensación de umbral. Las excepciones son
-          # --skip-check explícitos, revisables en un PR:
+          # el flag daría una falsa sensación de umbral. Las excepciones van
+          # como --skip-check acá, o como un comentario `checkov:skip` en el
+          # recurso cuando la justificación es específica de ese recurso.
           #
           #   CKV_GCP_43  rotación de clave KMS: GCP no soporta rotación
           #               automática en claves ASYMMETRIC_SIGN, y rotar la del
           #               attestor invalida las attestations ya emitidas.
           #   CKV_GCP_84  Artifact Registry con CMEK: no aplica a un registry
           #               de imágenes públicas de demo.
-          mkdir -p checkov-out
           checkov \
             --directory terraform \
             --framework terraform \
             --skip-check CKV_GCP_43,CKV_GCP_84 \
             --output cli --output sarif \
-            --output-file-path console,checkov-out \
+            --output-file-path console,checkov.sarif \
             --compact
 
-      - name: Qué archivos dejó Checkov
+      - name: Qué dejó Checkov en el disco
         if: always()
-        run: ls -la checkov-out || echo "checkov-out no existe"
+        run: ls -la *.sarif || echo "no escribió ningún .sarif"
 
       # El upload solo corre si el SARIF existe de verdad. Antes fallaba con
       # "Path does not exist" y ese error tapaba el resultado real del scan.
       - uses: github/codeql-action/upload-sarif@v3
-        if: always() && hashFiles('checkov-out/results_sarif.sarif') != ''
+        if: always() && hashFiles('checkov.sarif') != ''
         with:
-          sarif_file: checkov-out/results_sarif.sarif
+          sarif_file: checkov.sarif
           category: checkov
 
       - name: El gate de IaC falla si Checkov encontró algo

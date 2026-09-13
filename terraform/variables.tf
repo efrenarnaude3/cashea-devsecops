@@ -24,6 +24,15 @@ variable "image" {
 variable "github_repository" {
   description = "owner/repo autorizado a impersonar las service accounts vía Workload Identity Federation. Solo este repo puede publicar y desplegar."
   type        = string
+
+  # El formato importa: de acá salen la condición del provider OIDC y el
+  # principalSet de los bindings. Un valor con la URL completa o con barra
+  # final produciría una condición que no matchea nunca, y el síntoma sería
+  # "el pipeline no puede autenticarse" en vez de "el dato está mal escrito".
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", var.github_repository))
+    error_message = "github_repository tiene que ser owner/repo, sin https:// ni barra final."
+  }
 }
 
 variable "ingress" {

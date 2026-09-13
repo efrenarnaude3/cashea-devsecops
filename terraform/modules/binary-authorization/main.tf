@@ -40,11 +40,19 @@ resource "google_kms_crypto_key" "attestor" {
   }
 
   lifecycle {
-    # Borrar una clave que firmó attestations vivas las invalida a todas. En
-    # producción esto va en true. Queda en false para que un stack de demo se
-    # pueda destruir. Está hardcodeado porque Terraform no admite variables
-    # dentro de `lifecycle`: cambiarlo es un cambio de código, revisable.
-    prevent_destroy = false
+    # Borrar una clave que firmó attestations vivas las invalida a todas, y
+    # deja de golpe a todas las imágenes ya desplegadas sin poder demostrar su
+    # procedencia. Por eso va en true.
+    #
+    # Lo tenía en false por comodidad, para poder destruir un sandbox, y
+    # Checkov lo marcó con CKV_GCP_82. Tenía razón: "es un demo" no es una
+    # razón de seguridad, y un repo de referencia no debería enseñar el valor
+    # inseguro. Para desarmar un entorno de prueba, el camino es un commit que
+    # lo ponga en false a propósito, que queda revisable en un PR.
+    #
+    # Está hardcodeado porque Terraform no acepta variables dentro de
+    # `lifecycle`: el bloque se evalúa antes de que se conozcan los valores.
+    prevent_destroy = true
   }
 }
 
