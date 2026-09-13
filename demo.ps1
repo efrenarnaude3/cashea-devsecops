@@ -44,6 +44,13 @@ param(
     # Kubernetes v1.33-v1.35. El nodo de kind está fijado en v1.34 dentro de esa
     # ventana, en deploy/kind/cluster.yaml. Las dos líneas se mueven juntas.
     [string]$KyvernoVersion = 'v1.19.0',
+
+    # De dónde bajan las imágenes de Kyverno. El manifiesto oficial apunta a
+    # reg.kyverno.io, pero ghcr.io/kyverno es el repositorio documentado del
+    # proyecto y sirve las mismas imágenes. Se puede cambiar porque en una red
+    # con inspección TLS corporativa no todos los registries son alcanzables por
+    # igual, y eso no debería ser motivo para no poder correr el demo.
+    [string]$KyvernoRegistry = 'ghcr.io',
     [string]$ClusterName = 'heimdall'
 )
 
@@ -200,7 +207,27 @@ function Invoke-Up {
     # --force-conflicts cubre el caso de un intento previo: los objetos que ya
     # entraron por client-side apply pertenecen a otro field manager y el
     # server-side apply los reclamaría con un conflicto.
-    kubectl apply --server-side --force-conflicts -f "https://github.com/kyverno/kyverno/releases/download/$KyvernoVersion/install.yaml"
+    # El manifiesto se baja y se reescribe antes de aplicarlo, en vez de
+    # aplicarlo directo desde la URL. Dos razones:
+    #
+    # 1. Permite apuntar las imágenes a otro registry sin usar Helm.
+    # 2. Deja en .rendered/ exactamente lo que se le mandó al clúster, que es lo
+    #    que uno quiere tener a mano cuando algo no arranca.
+    if (-not (Test-Path $rendered)) { New-Item -ItemType Directory -Path $rendered | Out-Null }
+    $installUrl = "https://github.com/kyverno/kyverno/releases/download/$KyvernoVersion/install.yaml"
+    $installFile = Join-Path $rendered 'kyverno-install.yaml'
+
+    Write-Host "  Bajando el manifiesto de $KyvernoVersion..."
+    $manifest = (Invoke-WebRequest -Uri $installUrl -UseBasicParsing).Content
+    if ($manifest -is [byte[]]) { $manifest = [System.Text.Encoding]::UTF8.GetString($manifest) }
+
+    if ($KyvernoRegistry -ne 'reg.kyverno.io') {
+        Write-Host "  Reescribiendo las imágenes: reg.kyverno.io -> $KyvernoRegistry"
+        $manifest = $manifest.Replace('reg.kyverno.io/', "$KyvernoRegistry/")
+    }
+    [System.IO.File]::WriteAllText($installFile, $manifest, (New-Object System.Text.UTF8Encoding($false)))
+
+    kubectl apply --server-side --force-conflicts -f $installFile
     if ($LASTEXITCODE -ne 0) { throw 'Falló la instalación de Kyverno.' }
 
     # Un CRD aceptado todavía no es un CRD servido: el API server tiene que

@@ -27,6 +27,48 @@
 version: 1
 
 exceptions:
+  # Escrita en respuesta al reporte real de la corrida en modo preview del
+  # 2026-09-12, que marcó 7 hallazgos bloqueantes. Los 7 son una sola causa.
+  #
+  # multer entra como dependencia transitiva de @nestjs/platform-express, que a
+  # su vez viene con @nestjs/platform-express por ser el adaptador HTTP por
+  # defecto de NestJS. El servicio no recibe archivos: no hay un solo uso de
+  # FileInterceptor, multipart ni multer en el código. Verificable en un
+  # comando, que es la parte que importa de una justificación:
+  #
+  #   Get-ChildItem -Recurse service\src -Filter *.ts |
+  #     Select-String -Pattern "FileInterceptor|multipart|multer"
+  #
+  # Ese comando no devuelve nada. Mientras siga sin devolver nada, el código
+  # vulnerable está en la imagen pero no hay forma de llegar a él desde ninguna
+  # ruta expuesta. Eso no lo vuelve inofensivo — lo vuelve no explotable HOY, y
+  # por eso la excepción vence en vez de cerrarse.
+  #
+  # Al vencer, la revisión tiene dos salidas posibles: que exista una versión de
+  # @nestjs/platform-express que no arrastre multer vulnerable, o que el
+  # servicio haya empezado a recibir archivos, en cuyo caso la excepción deja de
+  # ser válida y tiene que bloquear.
+  - package: multer
+    reason: >-
+      Dependencia transitiva de @nestjs/platform-express. El servicio no expone
+      ninguna ruta que acepte multipart/form-data ni usa FileInterceptor, así
+      que el código afectado no es alcanzable. Verificado por búsqueda en
+      service/src: cero coincidencias de FileInterceptor, multipart o multer.
+    approved_by: efren.arnaude
+    expires_on: 2026-11-13
+
+  # El mismo hallazgo visto desde el padre: npm audit reporta
+  # @nestjs/platform-express como vulnerable porque depende de multer. Va
+  # separado porque el gate matchea por componente, y el componente que reporta
+  # npm no es el mismo string en los dos casos.
+  - package: "@nestjs/platform-express"
+    reason: >-
+      Reportado como vulnerable únicamente por su dependencia de multer, cubierta
+      por la excepción anterior y con la misma justificación y vencimiento. El
+      adaptador en sí no tiene advisory propio.
+    approved_by: efren.arnaude
+    expires_on: 2026-11-13
+
   - id: CVE-2026-1001
     reason: >-
       La dependencia afectada solo se usa en el toolchain de build. El stage de
