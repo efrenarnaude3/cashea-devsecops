@@ -8,7 +8,16 @@ version: 1
 
 # preview  → mide y reporta, nunca bloquea. Estado inicial obligatorio.
 # enforce  → bloquea Critical/High que cumplan las condiciones de abajo.
-mode: preview
+#
+# Este repo pasó de preview a enforce el 2026-09-13, y el orden importa: primero
+# corrió en preview sobre el servicio real y produjo un número —7 hallazgos
+# bloqueantes sobre 99 evaluados—, después se revisó ese número, se escribió la
+# excepción que lo explicaba, y recién ahí se encendió.
+#
+# Ese es el procedimiento que se propone para cualquier repo de Cashea. No es
+# burocracia: es lo que evita que el squad se entere de que el gate existe
+# cuando ya le bloqueó un merge.
+mode: enforce
 
 # Fecha en que el repo adoptó el gate. Los hallazgos anteriores a esta fecha
 # NO bloquean: los drena el proceso de gestión de vulnerabilidades con su SLA.

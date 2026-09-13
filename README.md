@@ -9,9 +9,18 @@ contenedor, un pipeline de GitHub Actions que solo publica lo que aprueba el
 gate, y un control de admisión en el clúster que verifica la firma antes de
 admitir el Pod.
 
-## El demo en tres comandos
+## El resultado, en una línea
 
-Los dos primeros no necesitan Docker, ni red, ni una cuenta de nube:
+El gate corrió en modo preview sobre este servicio y marcó **7 hallazgos
+bloqueantes sobre 99 evaluados**. Los 7 son una sola causa, con una excepción
+escrita, justificada de forma verificable y con fecha de vencimiento. Después de
+eso el repo pasó a `enforce`.
+
+Ese orden —medir, revisar, justificar, encender— es la propuesta. No el gate.
+
+## El demo
+
+Los dos primeros comandos no necesitan Docker, ni red, ni una cuenta de nube:
 
 ```powershell
 .\demo.ps1 check     # el repo se verifica a sí mismo + self-test del gate
@@ -23,14 +32,24 @@ make check           # lo mismo en Linux, macOS o Git Bash
 make gate
 ```
 
-El tercero levanta el control de admisión en un clúster local:
+El resto levanta el control de admisión en un clúster local:
 
 ```powershell
-.\demo.ps1 up -Owner tu-usuario
-.\demo.ps1 policy -Owner tu-usuario
-.\demo.ps1 deny      # una imagen no autorizada: RECHAZADA
-.\demo.ps1 deploy    # la imagen firmada por el pipeline: admitida
+.\demo.ps1 up -Preload -Owner tu-usuario   # clúster + Kyverno, sin salir a internet
+.\demo.ps1 trust                           # solo si tu red intercepta TLS
+.\demo.ps1 policy -Owner tu-usuario -Repo tu-repo
+.\demo.ps1 deny                            # imagen no autorizada: RECHAZADA
+.\demo.ps1 deploy -Owner tu-usuario        # imagen firmada: admitida
+curl.exe http://localhost:8080/health
 ```
+
+`-Preload` baja las imágenes con el Docker del host y las inyecta en el nodo, de
+modo que el clúster nunca necesita resolver un registry. `trust` hace falta
+detrás de un proxy de inspección TLS —Cloudflare Gateway, Zscaler y similares—,
+donde la verificación keyless de Sigstore no puede validar su propia cadena de
+confianza. Ambas cosas están explicadas en
+[`docs/operacion-en-red-corporativa.md`](docs/operacion-en-red-corporativa.md),
+que es además el documento con más hallazgos reutilizables de este repo.
 
 El paso a paso para la reunión está en
 [`docs/demo-runbook.md`](docs/demo-runbook.md).
@@ -49,7 +68,8 @@ deploy/           Clúster kind y manifiestos con PSS restricted
 terraform/        El camino en GCP: Cloud Run + Binary Authorization + WIF
 .github/workflows/  ci-security, codeql, secrets-scan, iac-scan
 demo/findings/    Hallazgos de ejemplo para mostrar el gate sin escanear nada
-docs/             Runbook del demo, camino GCP y decisiones de diseño
+docs/             Runbook del demo, camino GCP, operación detrás de un proxy
+                  de inspección TLS, y decisiones de diseño
 ```
 
 ## Las tres decisiones que sostienen el diseño
@@ -133,13 +153,32 @@ correr una instalación.
 [PASS] Kubernetes y política    PSS restricted + namespace correcto
 [PASS] Terraform                módulos, inputs y formato
 [PASS] Versiones y pines        Node coherente, dependencias exactas
-[WARN] Lockfile de npm          falta service/package-lock.json
+[PASS] Lockfile de npm          service/package-lock.json presente
 [PASS] Sin secretos hardcodeados
 
-8/9 chequeos pasaron, 1 con aviso
+9/9 chequeos pasaron
 ```
 
 Qué valida cada chequeo y por qué existe está en el docstring de
-`scripts/verify_repo.py`. El self-test de `scripts/gate.py` cubre las once
-ramas de la decisión más el mapeo de severidades de npm audit, y corre sin
-PyYAML y sin archivos: verifica la lógica incluso en una máquina limpia.
+`scripts/verify_repo.py`. El self-test de `scripts/gate.py` cubre las ramas de
+la decisión más el mapeo de severidades de npm audit, y corre sin PyYAML y sin
+archivos: verifica la lógica incluso en una máquina limpia.
+
+## Limitaciones conocidas
+
+Se listan acá porque salieron de correr esto sobre datos reales, y porque un
+repo de referencia que no dice dónde falla enseña mal.
+
+**El gate no deduplica entre fuentes.** La misma vulnerabilidad llega como GHSA
+desde `npm audit` (sin fecha de publicación) y como CVE desde Trivy (con fecha).
+Sin fecha, el gate no puede probar que un hallazgo es anterior a la adopción y lo
+trata como nuevo, que es el lado seguro del error — pero el efecto es que la
+misma vulnerabilidad bloquea o no según quién la reportó.
+
+**`ClusterPolicy` está deprecada.** Kyverno lo avisa al aplicar la política. La
+sucesora es `ImageValidatingPolicy`, con CEL.
+
+**La verificación keyless necesita salida a internet** hacia Fulcio, Rekor y el
+CDN de TUF. En una red con inspección TLS eso requiere una decisión previa de
+arquitectura, no un workaround. En Cloud Run con Binary Authorization el
+problema no existe: la verificación es interna a Google Cloud.
