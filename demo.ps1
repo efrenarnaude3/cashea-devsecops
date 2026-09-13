@@ -180,10 +180,10 @@ function Import-Images([string]$manifestText) {
     #
     #   x509: certificate signed by unknown authority
     #
-    # `kind load docker-image` copia la imagen del daemon del host al containerd
-    # del nodo por el socket de Docker, sin TLS y sin red. Combinado con
-    # imagePullPolicy IfNotPresent, el clúster queda efectivamente air-gapped,
-    # que además hace el demo reproducible y rápido.
+    # La imagen se exporta desde el daemon del host y se importa en el containerd
+    # del nodo, sin TLS y sin red de por medio. Combinado con imagePullPolicy
+    # IfNotPresent, el clúster queda efectivamente air-gapped, lo que además hace
+    # el demo reproducible y rápido.
     Assert-Tool 'docker' 'Abrí Docker Desktop'
 
     # Las imágenes salen del manifiesto, no de una lista escrita a mano: así no
@@ -194,15 +194,59 @@ function Import-Images([string]$manifestText) {
 
     $images = @($images) + @(Resolve-Image) | Sort-Object -Unique
 
+    $node = "$ClusterName-control-plane"
+    $tar = Join-Path $rendered 'image-load.tar'
+
     Write-Step "Precargando $($images.Count) imagen(es) en el nodo"
-    foreach ($image in $images) {
-        Write-Host "  $image"
-        docker pull --quiet $image
-        if ($LASTEXITCODE -ne 0) {
-            throw "No pude bajar $image con Docker. Si esto también falla, el problema no es solo del nodo: revisá la salida a internet del host."
+
+    # docker y ctr escriben progreso a stderr. Con ErrorActionPreference='Stop'
+    # eso es una excepción terminante, así que acá se baja a 'Continue' y los
+    # fallos se detectan por $LASTEXITCODE, que es lo que realmente importa.
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        foreach ($image in $images) {
+            Write-Host "  $image"
+
+            # --platform: sin esto Docker guarda el índice multiplataforma
+            # completo y el tar arrastra referencias a otras arquitecturas.
+            docker pull --quiet --platform linux/amd64 $image
+            if ($LASTEXITCODE -ne 0) {
+                throw "No pude bajar $image con Docker. Si esto también falla, el problema no es solo del nodo: revisá la salida a internet del host."
+            }
+
+            # Acá NO se usa `kind load docker-image`, y la razón es concreta: por
+            # dentro hace `ctr images import --all-platforms`, que exige que
+            # estén presentes TODOS los manifiestos que el índice menciona. Las
+            # imágenes publicadas con buildx incluyen manifiestos de attestation
+            # (provenance y SBOM) que Docker no baja al hacer pull de una sola
+            # plataforma, así que la importación muere con:
+            #
+            #   ctr: content digest sha256:...: not found
+            #
+            # El digest que nombra no es el de la imagen: es el de un manifiesto
+            # que el índice referencia y que nunca estuvo en disco. Haciendo el
+            # import a mano sin --all-platforms, ctr trae solo la plataforma que
+            # corresponde y el problema desaparece.
+            #
+            # Se copia el tar al nodo en vez de pipearlo porque PowerShell 5.1 no
+            # tiene redirección de entrada (`<`), y pipear binario por el
+            # pipeline de PowerShell corrompe los bytes.
+            docker save $image -o $tar
+            if ($LASTEXITCODE -ne 0) { throw "No pude exportar $image." }
+
+            docker cp $tar "${node}:/tmp/image-load.tar"
+            if ($LASTEXITCODE -ne 0) { throw "No pude copiar la imagen al nodo." }
+
+            docker exec $node ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs /tmp/image-load.tar
+            if ($LASTEXITCODE -ne 0) { throw "No pude importar $image en el containerd del nodo." }
+
+            docker exec $node rm -f /tmp/image-load.tar | Out-Null
+            Remove-Item $tar -Force -ErrorAction SilentlyContinue
         }
-        kind load docker-image $image --name $ClusterName
-        if ($LASTEXITCODE -ne 0) { throw "No pude cargar $image en el clúster." }
+    }
+    finally {
+        $ErrorActionPreference = $previousPreference
     }
     Write-Ok 'Imágenes disponibles en el nodo. El clúster ya no necesita salir a internet para arrancar.'
 }
