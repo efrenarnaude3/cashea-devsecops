@@ -9,6 +9,7 @@
         .\demo.ps1 check     Chequeo offline del repo + self-test del gate
         .\demo.ps1 gate      El gate decide sobre hallazgos de ejemplo
         .\demo.ps1 up        Crea el clúster kind e instala Kyverno
+                             Agregá -Preload si la red intercepta TLS
         .\demo.ps1 policy    Aplica la política de admisión (firma + registry)
         .\demo.ps1 deploy    Despliega la imagen firmada: la admite
         .\demo.ps1 deny      Intenta una imagen no autorizada: la rechaza
@@ -51,6 +52,11 @@ param(
     # con inspección TLS corporativa no todos los registries son alcanzables por
     # igual, y eso no debería ser motivo para no poder correr el demo.
     [string]$KyvernoRegistry = 'ghcr.io',
+
+    # Baja las imágenes con el Docker del host y las inyecta en el nodo, en vez
+    # de dejar que el nodo las baje. Necesario en redes con inspección TLS, y
+    # buena idea siempre: vuelve el arranque del demo determinista.
+    [switch]$Preload,
     [string]$ClusterName = 'heimdall'
 )
 
@@ -162,6 +168,45 @@ function Invoke-Gate {
     Write-Host "`nReporte completo en gate-report.md" -ForegroundColor DarkGray
 }
 
+function Import-Images([string]$manifestText) {
+    # Precarga: bajar las imágenes con el Docker del host y meterlas en el nodo,
+    # en vez de que el nodo las baje por su cuenta.
+    #
+    # Hace falta cuando la red intercepta TLS. En ese escenario el proxy
+    # corporativo (o el antivirus) re-firma los certificados con su propia CA;
+    # Windows la tiene instalada y por eso `docker pull` funciona, pero el nodo
+    # de kind es un contenedor Debian con su propio bundle de certificados, que
+    # no la conoce. El síntoma es siempre el mismo, contra cualquier registry:
+    #
+    #   x509: certificate signed by unknown authority
+    #
+    # `kind load docker-image` copia la imagen del daemon del host al containerd
+    # del nodo por el socket de Docker, sin TLS y sin red. Combinado con
+    # imagePullPolicy IfNotPresent, el clúster queda efectivamente air-gapped,
+    # que además hace el demo reproducible y rápido.
+    Assert-Tool 'docker' 'Abrí Docker Desktop'
+
+    # Las imágenes salen del manifiesto, no de una lista escrita a mano: así no
+    # se desincronizan cuando cambia la versión de Kyverno.
+    $images = [regex]::Matches($manifestText, '(?m)^\s*image:\s*"?([^"\s]+)"?\s*$') |
+    ForEach-Object { $_.Groups[1].Value } |
+    Sort-Object -Unique
+
+    $images = @($images) + @(Resolve-Image) | Sort-Object -Unique
+
+    Write-Step "Precargando $($images.Count) imagen(es) en el nodo"
+    foreach ($image in $images) {
+        Write-Host "  $image"
+        docker pull --quiet $image
+        if ($LASTEXITCODE -ne 0) {
+            throw "No pude bajar $image con Docker. Si esto también falla, el problema no es solo del nodo: revisá la salida a internet del host."
+        }
+        kind load docker-image $image --name $ClusterName
+        if ($LASTEXITCODE -ne 0) { throw "No pude cargar $image en el clúster." }
+    }
+    Write-Ok 'Imágenes disponibles en el nodo. El clúster ya no necesita salir a internet para arrancar.'
+}
+
 function Invoke-Up {
     Write-Step "Creando el clúster kind '$ClusterName'"
     Assert-Tool 'kind' 'choco install kind  (o https://kind.sigs.k8s.io)'
@@ -227,6 +272,8 @@ function Invoke-Up {
     }
     [System.IO.File]::WriteAllText($installFile, $manifest, (New-Object System.Text.UTF8Encoding($false)))
 
+    if ($Preload) { Import-Images $manifest }
+
     kubectl apply --server-side --force-conflicts -f $installFile
     if ($LASTEXITCODE -ne 0) { throw 'Falló la instalación de Kyverno.' }
 
@@ -258,7 +305,13 @@ function Invoke-Up {
         Write-Host ''
         kubectl -n kyverno get events --sort-by=.lastTimestamp 2>&1 | Select-Object -Last 15
         $ErrorActionPreference = $previous
-        throw "Los deployments de Kyverno no llegaron a estar listos. Si el gitVersion del server está fuera del rango que soporta Kyverno $KyvernoVersion, corregí la imagen del nodo en deploy\kind\cluster.yaml y recreá el clúster con .\demo.ps1 down."
+        $hint = if ($Preload) {
+            "Las imágenes ya estaban precargadas, así que no es la red. Mirá el STATUS de los Pods de arriba."
+        }
+        else {
+            "Si los Pods dicen ImagePullBackOff con 'x509: certificate signed by unknown authority', el nodo no confía en la CA que está interceptando TLS en tu red. Corré: .\demo.ps1 down; .\demo.ps1 up -Preload -Owner $script:Owner"
+        }
+        throw "Los deployments de Kyverno no llegaron a estar listos. $hint"
     }
     kubectl wait --for=condition=Ready pod -l app.kubernetes.io/part-of=kyverno -n kyverno --timeout=300s
     if ($LASTEXITCODE -ne 0) { throw 'Kyverno no llegó a estar listo.' }

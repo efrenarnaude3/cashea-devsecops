@@ -35,6 +35,14 @@ spec:
       containers:
         - name: notes-api
           image: __IMAGE__
+          # IfNotPresent, y no es para ahorrar ancho de banda. Kyverno reescribe
+          # la referencia al digest verificado antes de que el Pod se cree, así
+          # que lo que el kubelet tiene que resolver ya es inmutable: volver a
+          # consultar el registry no puede darle otra cosa. Además permite
+          # precargar la imagen en el nodo y correr el demo sin salida a
+          # internet, que en una red con inspección TLS es la diferencia entre
+          # que funcione y que no.
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 8080
