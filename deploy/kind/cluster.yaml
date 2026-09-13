@@ -4,7 +4,22 @@ kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: heimdall
 nodes:
+  # La versión de Kubernetes va fija acá, y no es un detalle de comodidad.
+  #
+  # Sin `image`, kind usa el nodo más nuevo que trae su binario — hoy v1.37 — y
+  # Kyverno soporta v1.33 a v1.35. El resultado de correr fuera de esa ventana
+  # no es un mensaje de "versión no soportada": los cuatro Deployments de
+  # Kyverno se instalan, los Pods nunca llegan a Ready y el rollout muere por
+  # timeout, sin decir por qué.
+  #
+  # Fijar la versión también es lo que hace reproducible al demo: sin esto, la
+  # misma rama puede funcionar hoy y romperse cuando kind publique un nodo más
+  # nuevo, en la máquina de otra persona y sin que nadie haya tocado el repo.
+  #
+  # Si se sube la versión de Kyverno, hay que revisar esta línea contra
+  # https://kyverno.io/docs/installation/releases/ — van juntas.
   - role: control-plane
+    image: kindest/node:v1.34.0
     kubeadmConfigPatches:
       - |
         kind: InitConfiguration

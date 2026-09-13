@@ -9,7 +9,9 @@ OWNER ?= $(shell echo "$${HEIMDALL_OWNER}")
 REPO_NAME ?= heimdall
 NAMESPACE ?= notes-api
 CLUSTER ?= heimdall
-KYVERNO_VERSION ?= v1.13.4
+# Atada a la imagen del nodo en deploy/kind/cluster.yaml: Kyverno v1.19 soporta
+# Kubernetes v1.33-v1.35. Ver https://kyverno.io/docs/installation/releases/
+KYVERNO_VERSION ?= v1.19.0
 IMAGE ?= ghcr.io/$(OWNER)/heimdall-notes-api:latest
 RENDERED := .rendered
 
@@ -69,7 +71,11 @@ run: ## Corre la imagen local con el hardening de runtime
 
 up: ## Crea el clúster kind e instala Kyverno
 	kind create cluster --name $(CLUSTER) --config deploy/kind/cluster.yaml || true
-	kubectl apply -f https://github.com/kyverno/kyverno/releases/download/$(KYVERNO_VERSION)/install.yaml
+	# --server-side es obligatorio: el CRD de ClusterPolicy no entra por apply
+	# clásico, porque el manifiesto completo no cabe en la anotación
+	# last-applied-configuration (límite de 262144 bytes).
+	kubectl apply --server-side --force-conflicts -f https://github.com/kyverno/kyverno/releases/download/$(KYVERNO_VERSION)/install.yaml
+	kubectl wait --for=condition=Established crd/clusterpolicies.kyverno.io --timeout=120s
 	# Los Deployments primero: `kubectl wait` sobre pods que todavía no fueron
 	# creados devuelve "no matching resources found" al instante.
 	kubectl -n kyverno rollout status deployment --timeout=300s

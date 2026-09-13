@@ -40,7 +40,10 @@ param(
     [string]$Repo = 'heimdall',
     [string]$Image = '',
     [string]$Namespace = 'notes-api',
-    [string]$KyvernoVersion = 'v1.13.4',
+    # Kyverno v1.19 es la release con soporte de la comunidad (ago-2026) y cubre
+    # Kubernetes v1.33-v1.35. El nodo de kind está fijado en v1.34 dentro de esa
+    # ventana, en deploy/kind/cluster.yaml. Las dos líneas se mueven juntas.
+    [string]$KyvernoVersion = 'v1.19.0',
     [string]$ClusterName = 'heimdall'
 )
 
@@ -167,7 +170,10 @@ function Invoke-Up {
     $ErrorActionPreference = $previous
 
     if ($existing -contains $ClusterName) {
-        Write-Warn "El clúster ya existe, lo reuso."
+        # Reusar ahorra tres minutos, pero un clúster que ya existe conserva la
+        # versión de Kubernetes con la que se creó: cambiar la imagen del nodo
+        # en cluster.yaml no tiene ningún efecto hasta que se recrea.
+        Write-Warn "El clúster ya existe, lo reuso. Si cambiaste la versión del nodo en deploy\kind\cluster.yaml, primero corré .\demo.ps1 down."
     }
     else {
         kind create cluster --name $ClusterName --config (Join-Path $root 'deploy\kind\cluster.yaml')
@@ -209,7 +215,24 @@ function Invoke-Up {
     # instante, porque los Pods todavía no existen: fallaría en 2 segundos y
     # parecería un timeout de 300.
     kubectl -n kyverno rollout status deployment --timeout=300s
-    if ($LASTEXITCODE -ne 0) { throw 'Los deployments de Kyverno no llegaron a estar listos.' }
+    if ($LASTEXITCODE -ne 0) {
+        # Un timeout de rollout no dice nada por sí solo, y es el punto donde
+        # más fácil es perder veinte minutos adivinando. Estas tres consultas
+        # separan las tres causas posibles: la imagen no baja (ImagePullBackOff),
+        # el proceso arranca y muere (CrashLoopBackOff, casi siempre versión de
+        # Kubernetes fuera de la ventana soportada), o el Pod nunca se programa
+        # (Pending por falta de memoria en Docker Desktop).
+        Write-Warn 'Kyverno no llegó a estar listo. Esto es lo que dice el clúster:'
+        $previous = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        kubectl -n kyverno get pods -o wide 2>&1
+        Write-Host ''
+        kubectl version -o yaml 2>&1 | Select-String -Pattern 'gitVersion'
+        Write-Host ''
+        kubectl -n kyverno get events --sort-by=.lastTimestamp 2>&1 | Select-Object -Last 15
+        $ErrorActionPreference = $previous
+        throw "Los deployments de Kyverno no llegaron a estar listos. Si el gitVersion del server está fuera del rango que soporta Kyverno $KyvernoVersion, corregí la imagen del nodo en deploy\kind\cluster.yaml y recreá el clúster con .\demo.ps1 down."
+    }
     kubectl wait --for=condition=Ready pod -l app.kubernetes.io/part-of=kyverno -n kyverno --timeout=300s
     if ($LASTEXITCODE -ne 0) { throw 'Kyverno no llegó a estar listo.' }
 
