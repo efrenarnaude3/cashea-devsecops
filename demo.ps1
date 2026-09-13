@@ -469,7 +469,17 @@ spec:
     $patchFile = Join-Path $rendered 'kyverno-ca-patch.yaml'
     [System.IO.File]::WriteAllText($patchFile, $patch, (New-Object System.Text.UTF8Encoding($false)))
 
-    kubectl -n kyverno patch deployment kyverno-admission-controller --type=merge --patch-file $patchFile
+    # --type=strategic, NO merge. Un JSON merge patch (RFC 7386) reemplaza las
+    # listas enteras: el parche de arriba habría dejado el contenedor con solo
+    # `name` y `volumeMounts`, borrando `image` y todo lo demás. El error lo dice
+    # con precisión y conviene reconocerlo:
+    #
+    #   spec.template.spec.containers[0].image: Required value
+    #
+    # El strategic merge patch conoce las claves de mezcla de los tipos nativos
+    # de Kubernetes —`name` para containers y volumes, `mountPath` para
+    # volumeMounts— y fusiona por elemento en vez de reemplazar.
+    kubectl -n kyverno patch deployment kyverno-admission-controller --type=strategic --patch-file $patchFile
     if ($LASTEXITCODE -ne 0) { throw 'No pude parchear el deployment de Kyverno.' }
 
     Write-Host '  Esperando a que Kyverno vuelva a levantar...'
