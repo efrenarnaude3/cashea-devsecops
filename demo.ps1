@@ -256,6 +256,38 @@ function Import-Images([string]$manifestText) {
 
             docker exec $node rm -f /var/tmp/image-load.tar | Out-Null
             Remove-Item $tar -Force -ErrorAction SilentlyContinue
+
+            # La imagen quedó en containerd con UN solo nombre: el tag. Pero
+            # Kyverno, al admitir el Pod, reescribe la referencia al digest que
+            # verificó (mutateDigest), y el kubelet termina pidiendo:
+            #
+            #   ghcr.io/owner/img:latest@sha256:2ca817...
+            #
+            # containerd busca por el string exacto de la referencia. Ese nombre
+            # no existe en su store, así que sale a resolverlo al registry —y en
+            # una red con inspección TLS, vuelve a fallar con x509. El síntoma
+            # desorienta: la imagen está en el nodo y aun así da ImagePullBackOff.
+            #
+            # Por eso se registran también las formas con digest. Es exactamente
+            # lo que hace falta para que un clúster air-gapped conviva con una
+            # política que pinea digests, que es la combinación correcta: la
+            # precarga no debería obligar a renunciar a la inmutabilidad.
+            $row = docker exec $node ctr -n k8s.io images ls "name==$image" 2>&1 |
+            Select-Object -Skip 1 | Select-Object -First 1
+            $digest = ("$row" -split '\s+') | Where-Object { $_ -like 'sha256:*' } | Select-Object -First 1
+
+            if ($digest) {
+                $lastColon = $image.LastIndexOf(':')
+                $lastSlash = $image.LastIndexOf('/')
+                $repo = if ($lastColon -gt $lastSlash) { $image.Substring(0, $lastColon) } else { $image }
+
+                docker exec $node ctr -n k8s.io images tag --force $image "$repo@$digest" | Out-Null
+                docker exec $node ctr -n k8s.io images tag --force $image "$image@$digest" | Out-Null
+                Write-Host "    también como @$digest" -ForegroundColor DarkGray
+            }
+            else {
+                Write-Warn "No pude leer el digest de $image; si la política pinea digests, el kubelet va a intentar bajarla."
+            }
         }
     }
     finally {
@@ -541,8 +573,29 @@ function Invoke-Deploy {
     Write-Host '  Esperando el rollout...'
     kubectl rollout status deployment/notes-api -n $Namespace --timeout=180s
     if ($LASTEXITCODE -eq 0) {
-        Write-Ok 'Pod admitido y corriendo. Probalo: curl http://localhost:8080/health'
+        Write-Ok 'Pod admitido y corriendo. Probalo: curl.exe http://localhost:8080/health'
+        return
     }
+
+    # Llegar acá significa algo distinto de un rechazo, y la diferencia importa:
+    # el Pod fue ADMITIDO —la firma verificó— y después no llegó a Ready. Eso ya
+    # no es el control de admisión, es la aplicación o la imagen.
+    Write-Warn 'El Pod fue admitido pero no llegó a Ready. La firma verificó; el problema es posterior.'
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+
+    kubectl -n $Namespace get pods -o wide 2>&1
+    Write-Host ''
+    Write-Host 'Imagen que quedó en el Pod (Kyverno la reescribe al digest verificado):' -ForegroundColor DarkGray
+    kubectl -n $Namespace get pods -o jsonpath='{range .items[*]}{.spec.containers[0].image}{"\n"}{end}' 2>&1
+    Write-Host ''
+    Write-Host 'Últimos eventos:' -ForegroundColor DarkGray
+    kubectl -n $Namespace get events --sort-by=.lastTimestamp 2>&1 | Select-Object -Last 12
+    Write-Host ''
+    Write-Host 'Logs del contenedor:' -ForegroundColor DarkGray
+    kubectl -n $Namespace logs deployment/notes-api --tail=30 --all-containers 2>&1
+
+    $ErrorActionPreference = $previous
 }
 
 function Invoke-Deny {
