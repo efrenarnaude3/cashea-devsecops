@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: notes-api
+  namespace: notes-api
+spec:
+  # NodePort solo porque el clúster kind mapea 30080 al puerto 8080 de la
+  # máquina, para poder curlear el servicio durante el demo. En un clúster
+  # real esto es ClusterIP detrás de un Ingress.
+  type: NodePort
+  selector:
+    app: notes-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 30080

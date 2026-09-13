@@ -1,0 +1,47 @@
+# Secretos y configuración local
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+.eslintcache
+
+# Python
+__pycache__/
+*.pyc
+
+# Terraform
+# El .terraform.lock.hcl NO se ignora a propósito: es el pin real de las
+# versiones y los checksums de los providers, y tiene que estar en el repo
+# para que un apply local y uno de CI resuelvan lo mismo.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+
+# Salidas del demo y de los escáneres.
+#
+# Los patrones van anclados con "/" a la raíz. Sin el ancla, `trivy-*.json`
+# matchea en cualquier nivel y se come demo/findings/trivy-image.json, que es
+# el archivo sobre el que corre el demo del gate: en un clone limpio no
+# existiría y el gate no tendría nada que decidir.
+.rendered/
+/gate-report.md
+/gate-report.json
+/reports/
+/*.sarif
+/sbom.spdx.json
+/npm-audit.json
+/trivy-*.json
+
+# Las fixtures del demo sí se versionan.
+!demo/findings/
+!demo/findings/*.json
+
+.DS_Store

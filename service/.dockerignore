@@ -1,0 +1,14 @@
+.env
+.env.*
+!.env.example
+node_modules
+dist
+coverage
+test
+.git
+.github
+*.md
+Dockerfile*
+.dockerignore
+.eslintcache
+*.log

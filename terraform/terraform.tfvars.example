@@ -1,0 +1,10 @@
+# Copiar a terraform.tfvars (está en .gitignore) y completar.
+# Acá no va ningún secreto: todo esto es configuración no sensible.
+
+project_id        = "heimdall-demo-123456"
+region            = "us-central1"
+github_repository = "tu-usuario/heimdall"
+
+# Referenciada por digest, no por tag. El pipeline imprime el digest exacto
+# después de firmar la imagen.
+# image = "us-central1-docker.pkg.dev/heimdall-demo-123456/heimdall/notes-api@sha256:..."

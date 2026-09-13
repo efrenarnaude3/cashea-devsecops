@@ -1,0 +1,37 @@
+# Excepciones al gate: el mecanismo que convierte un bypass en un riesgo
+# aceptado, con nombre y fecha de vencimiento.
+#
+# Tres campos son obligatorios siempre, más uno que diga a qué aplica. Si
+# falta alguno, el gate falla la corrida entera, en preview y en enforce: una
+# excepción mal formada no es un hallazgo, es el control roto, y un control
+# roto no puede reportar "todo bien".
+#
+#   reason       Por qué se acepta. "No aplica" no es una razón: decí por qué
+#   approved_by  Quién lo aprobó. Queda en git, con autor y fecha del commit
+#   expires_on   Fecha de revisión. Al vencer, el hallazgo vuelve a bloquear
+#                solo, sin que nadie tenga que acordarse
+#
+# Y una de estas dos, para decir a qué aplica:
+#
+#   id           Un hallazgo puntual (CVE, GHSA o regla de SAST). El gate
+#                normaliza: `GHSA-xxxx-xxxx-xxxx` matchea también la URL del
+#                advisory que reporta npm audit
+#   package      Todos los hallazgos de un paquete. Sirve cuando una sola
+#                causa produce muchos advisories. El precio: un advisory nuevo
+#                de ese paquete queda cubierto sin que nadie lo mire, y por eso
+#                esta forma vence igual que cualquier otra
+#
+# Vigencia máxima: 90 días. Una excepción que no vence no es una excepción, es
+# una decisión silenciosa.
+
+version: 1
+
+exceptions:
+  - id: CVE-2026-1001
+    reason: >-
+      La dependencia afectada solo se usa en el toolchain de build. El stage de
+      runtime es distroless y se arma con `npm ci --omit=dev`, así que el
+      paquete no existe en la imagen desplegada. Verificado contra el SBOM de
+      la imagen publicada.
+    approved_by: appsec
+    expires_on: 2026-12-01

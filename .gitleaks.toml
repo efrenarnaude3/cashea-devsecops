@@ -1,0 +1,16 @@
+title = "heimdall gitleaks config"
+
+[extend]
+useDefault = true
+
+# El token de los tests es un valor fijo y declarado, no una credencial. Se
+# permite ese string exacto y solo en el archivo de tests: cualquier otra cosa
+# con forma de secreto, en cualquier otro lugar, sigue rompiendo el scan.
+[allowlist]
+regexes = [
+  '''test-token-not-a-real-credential''',
+]
+paths = [
+  '''service/test/security\.spec\.ts''',
+  '''service/\.env\.example''',
+]

@@ -1,0 +1,15 @@
+# Pod Security Admission en `restricted`, a nivel namespace.
+#
+# Es una segunda capa independiente del manifiesto: si un Deployment futuro se
+# olvida de runAsNonRoot o del seccomp profile, lo rechaza el API server. El
+# securityContext del Deployment y esto se verifican mutuamente.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: notes-api
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+    app.kubernetes.io/part-of: heimdall

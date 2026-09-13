@@ -1,0 +1,352 @@
+# Heimdall — pipeline con el gate de CD.
+#
+# El orden importa y es la decisión de diseño principal: la imagen se
+# construye, se escanea y se somete al gate ANTES de publicarse. Si el gate
+# bloquea, la imagen nunca sale del runner. Publicar primero y escanear
+# después deja una imagen vulnerable en el registry esperando a que alguien
+# la despliegue.
+#
+#   quality ─┐
+#   sca ─────┼─→ build-scan-gate-sign ─→ (imagen firmada en ghcr.io)
+#   secrets ─┘         │
+#                      └─ gate.py decide con TODOS los reportes juntos
+#
+# La firma es cosign keyless: la identidad OIDC del workflow es la clave, así
+# que no hay material privado que rotar ni que filtrar. Kyverno (en el clúster)
+# verifica esa firma antes de admitir el Pod.
+
+name: ci-security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "20"
+  PYTHON_VERSION: "3.11"
+  IMAGE_NAME: heimdall-notes-api
+
+jobs:
+  quality:
+    name: Lint, tipos, tests y self-test del gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: service/package-lock.json
+      - name: Instalar dependencias
+        working-directory: service
+        run: npm ci
+      - name: Lint
+        working-directory: service
+        run: npm run lint
+      - name: Type check
+        working-directory: service
+        run: npm run typecheck
+      - name: Tests
+        working-directory: service
+        run: npm test
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      # El motor del gate se testea a sí mismo. Si la lógica de decisión se
+      # rompe, se entera acá y no el día que tenga que bloquear algo.
+      - name: Self-test del gate
+        run: python scripts/gate.py --self-test
+      - name: Chequeo de coherencia del repo
+        run: |
+          pip install --no-cache-dir pyyaml
+          python scripts/verify_repo.py
+
+  sca:
+    name: SCA (npm audit + Trivy filesystem)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: service/package-lock.json
+      # Dos auditorías, con destinos distintos, porque son dos riesgos
+      # distintos con dos remediaciones distintas.
+      #
+      # Producción: son las dependencias que viajan en la imagen (el runtime se
+      # arma con `npm ci --omit=dev`). Estas SÍ alimentan al gate: si hay una
+      # HIGH acá, está corriendo en el clúster.
+      #
+      # Toolchain: compiladores, linters y test runners. Son riesgo de supply
+      # chain y hay que atenderlas, pero no están en la imagen, así que su
+      # lugar es el backlog con SLA y los PRs de Dependabot, no frenar un
+      # deploy. Bloquear por ellas entrena al equipo a pedir excepciones para
+      # cosas que no cambian la superficie expuesta.
+      - name: npm audit (dependencias de producción, alimenta el gate)
+        working-directory: service
+        # El exit code de npm audit no distingue lo que a este repo le importa.
+        # Quien decide es el gate, con el JSON completo.
+        run: npm audit --omit=dev --json > ../npm-audit.json || true
+
+      - name: npm audit (toolchain, informativo)
+        working-directory: service
+        run: npm audit --json > ../npm-audit-toolchain.json || true
+
+      - name: Publicar la auditoría del toolchain
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          # Nombre fuera del patrón `reports-*` a propósito: el job del gate
+          # descarga solo lo que tiene que evaluar.
+          name: audit-toolchain
+          path: npm-audit-toolchain.json
+          if-no-files-found: warn
+      - name: Trivy filesystem (SARIF para la pestaña Security)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: service
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: "0"
+          format: sarif
+          output: trivy-fs.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+          category: trivy-fs
+      - name: Trivy filesystem (JSON para el gate)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: service
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: "0"
+          format: json
+          output: trivy-fs.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: reports-sca
+          path: |
+            npm-audit.json
+            trivy-fs.json
+          # error, no warn: si estos reportes no existen, el gate decidiría
+          # con menos información de la que cree tener y nadie se enteraría.
+          if-no-files-found: error
+
+  secrets:
+    name: Secretos en el diff
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # gitleaks necesita historia para diffear
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          # Solo lo exigen los repos de una organización. En una cuenta
+          # personal corre sin esto.
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+
+  build-scan-gate-sign:
+    name: Build, escaneo, gate y firma
+    runs-on: ubuntu-latest
+    needs: [quality, sca, secrets]
+    permissions:
+      contents: read
+      packages: write # push a ghcr.io
+      id-token: write # la identidad OIDC ES la clave de firma (cosign keyless)
+      security-events: write # subir el SARIF de Trivy a la pestaña Security
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
+      gate_exit: ${{ steps.gate.outputs.exit_code }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Calcular la referencia de la imagen
+        id: meta
+        run: |
+          # ghcr exige minúsculas en el owner; un usuario con mayúsculas
+          # rompe el push con un error que no dice eso.
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          echo "image=ghcr.io/${owner}/${IMAGE_NAME}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Se construye UNA sola vez y se carga en el daemon local. No se publica
+      # todavía.
+      #
+      # Un segundo build para publicar parecería equivalente y no lo es: con
+      # otros flags (provenance, sbom) el artefacto publicado es un índice OCI
+      # distinto, y el digest firmado dejaría de ser el digest escaneado. El
+      # push de más abajo sube exactamente esta imagen.
+      - name: Build (local, sin publicar)
+        uses: docker/build-push-action@v6
+        with:
+          context: service
+          load: true
+          push: false
+          tags: ${{ steps.meta.outputs.image }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Trivy sobre la imagen (JSON para el gate)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}:${{ github.sha }}
+          severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+          exit-code: "0"
+          format: json
+          output: trivy-image.json
+
+      - name: Trivy sobre la imagen (SARIF para la pestaña Security)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}:${{ github.sha }}
+          severity: MEDIUM,HIGH,CRITICAL
+          exit-code: "0"
+          format: sarif
+          output: trivy-image.sarif
+
+      - name: Traer los reportes de los otros jobs
+        uses: actions/download-artifact@v4
+        with:
+          pattern: reports-*
+          path: reports
+          merge-multiple: true
+
+      - name: Juntar todos los reportes
+        run: |
+          mkdir -p reports
+          cp trivy-image.json reports/ 2>/dev/null || true
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # Acá se decide. Un solo lugar, con todos los reportes juntos.
+      - name: Gate
+        id: gate
+        run: |
+          pip install --no-cache-dir pyyaml
+          set +e
+          python scripts/gate.py \
+            --findings reports \
+            --gate appsec/gate.yaml \
+            --exceptions appsec/exceptions.yaml \
+            --out gate-report
+          code=$?
+          set -e
+          echo "exit_code=${code}" >> "$GITHUB_OUTPUT"
+          cat gate-report.md >> "$GITHUB_STEP_SUMMARY"
+          exit "${code}"
+
+      - name: Publicar el reporte del gate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gate-report
+          path: |
+            gate-report.md
+            gate-report.json
+          if-no-files-found: warn
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+      # A partir de acá solo se llega si el gate dijo que sí.
+      #
+      # La condición es `ref == main`, no "no es un PR": un workflow_dispatch
+      # desde otra rama emitiría una firma con identidad
+      # ...@refs/heads/<rama>, que la política del clúster rechaza para
+      # siempre. Mejor no publicar que publicar algo infirmable.
+      - name: Login a ghcr.io
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # `docker push` de la imagen que ya está en el daemon: la misma que
+      # Trivy escaneó y que el gate aprobó, byte por byte. El digest sale del
+      # RepoDigest que devuelve el registry, y es el que se firma.
+      - name: Publicar la imagen aprobada
+        id: push
+        if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          TAG: ${{ github.sha }}
+        run: |
+          docker push "${IMAGE}:${TAG}"
+          docker tag "${IMAGE}:${TAG}" "${IMAGE}:latest"
+          docker push "${IMAGE}:latest"
+
+          digest=$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE}:${TAG}" | cut -d@ -f2)
+          if [ -z "${digest}" ]; then
+            echo "No pude resolver el digest de la imagen publicada" >&2
+            exit 1
+          fi
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+          echo "Imagen publicada: ${IMAGE}@${digest}"
+
+      - uses: anchore/sbom-action@v0
+        if: steps.push.outcome == 'success'
+        with:
+          image: ${{ steps.meta.outputs.image }}@${{ steps.push.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+
+      - uses: sigstore/cosign-installer@v3
+        if: steps.push.outcome == 'success'
+
+      - name: Firmar la imagen (keyless)
+        if: steps.push.outcome == 'success'
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Adjuntar el SBOM como attestation firmada
+        if: steps.push.outcome == 'success'
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign attest --yes --predicate sbom.spdx.json --type spdxjson "${IMAGE}@${DIGEST}"
+
+      # Verifica con la identidad EXACTA que exige policy/verify-image-signature.yaml.
+      # Con --certificate-identity-regexp sobre el repo entero, una firma
+      # emitida por otro workflow pasaría acá y sería rechazada en el clúster:
+      # el pipeline diría que está todo bien y el deploy fallaría después.
+      - name: Verificar la firma con la misma regla que usa el clúster
+        if: steps.push.outcome == 'success'
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          cosign verify \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci-security.yml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${IMAGE}@${DIGEST}"
+
+      - uses: actions/upload-artifact@v4
+        if: steps.push.outcome == 'success'
+        with:
+          name: sbom
+          path: sbom.spdx.json

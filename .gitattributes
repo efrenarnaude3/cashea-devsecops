@@ -1,0 +1,18 @@
+# Todo este repo se ejecuta en Linux: runners de GitHub Actions, contenedores
+# distroless, nodos de Kubernetes. Los finales de línea se normalizan a LF en
+# el repositorio, sin importar desde dónde commitee cada uno.
+#
+# Sin esto, un commit desde Windows puede meter CRLF en el Makefile o en un
+# heredoc de shell, y el pipeline falla con errores que no se parecen en nada
+# a la causa real.
+* text=auto eol=lf
+
+Makefile text eol=lf
+*.sh text eol=lf
+# Los scripts de PowerShell son la excepción: Windows los quiere con CRLF.
+*.ps1 text eol=crlf
+
+*.png binary
+*.jpg binary
+*.pdf binary
+*.zip binary

@@ -1,0 +1,65 @@
+{
+  "_comment": "Datos sintéticos para el demo del gate. Los IDs CVE-2026-xxxx no son reales: existen para que cada rama de la decisión (bloquea, excepción vigente, legacy, sin fix, bajo umbral) se pueda mostrar sin depender de un escaneo en vivo ni de red. Un reporte real de Trivy tiene exactamente esta forma.",
+  "SchemaVersion": 2,
+  "ArtifactName": "ghcr.io/ejemplo/heimdall-notes-api:demo",
+  "ArtifactType": "container_image",
+  "Results": [
+    {
+      "Target": "ghcr.io/ejemplo/heimdall-notes-api:demo (debian 12.8)",
+      "Class": "os-pkgs",
+      "Type": "debian",
+      "Vulnerabilities": [
+        {
+          "VulnerabilityID": "CVE-2026-1000",
+          "PkgName": "demo-lib",
+          "InstalledVersion": "4.0.1",
+          "FixedVersion": "4.1.2",
+          "Severity": "CRITICAL",
+          "Title": "Ejecución remota de código al deserializar entrada no confiable",
+          "PublishedDate": "2026-09-20T10:00:00Z",
+          "LastModifiedDate": "2026-09-21T08:00:00Z"
+        },
+        {
+          "VulnerabilityID": "CVE-2026-1001",
+          "PkgName": "build-only-dep",
+          "InstalledVersion": "7.0.3",
+          "FixedVersion": "7.0.6",
+          "Severity": "CRITICAL",
+          "Title": "Inyección de argumentos en una utilidad de build",
+          "PublishedDate": "2026-09-18T10:00:00Z",
+          "LastModifiedDate": "2026-09-18T10:00:00Z"
+        },
+        {
+          "VulnerabilityID": "CVE-2023-45857",
+          "PkgName": "axios",
+          "InstalledVersion": "1.5.0",
+          "FixedVersion": "1.6.2",
+          "Severity": "HIGH",
+          "Title": "Filtrado del secreto de XSRF a terceros vía redirect",
+          "PublishedDate": "2023-11-08T21:15:00Z",
+          "LastModifiedDate": "2024-01-10T12:00:00Z"
+        },
+        {
+          "VulnerabilityID": "CVE-2026-1002",
+          "PkgName": "libsystem-demo",
+          "InstalledVersion": "2.3.0",
+          "FixedVersion": "",
+          "Severity": "HIGH",
+          "Title": "Denegación de servicio sin parche publicado",
+          "PublishedDate": "2026-09-19T09:00:00Z",
+          "LastModifiedDate": "2026-09-19T09:00:00Z"
+        },
+        {
+          "VulnerabilityID": "CVE-2026-1003",
+          "PkgName": "demo-utils",
+          "InstalledVersion": "1.1.0",
+          "FixedVersion": "1.1.1",
+          "Severity": "MEDIUM",
+          "Title": "Lectura de archivo fuera del directorio esperado",
+          "PublishedDate": "2026-09-19T09:00:00Z",
+          "LastModifiedDate": "2026-09-19T09:00:00Z"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,34 @@
+# Contrato del gate para este repositorio.
+#
+# Este archivo es lo que un squad agrega para adoptar el control. Vive en el
+# repo del squad, no en un panel central: el estado del gate se revisa en un
+# PR, como cualquier otro cambio.
+
+version: 1
+
+# preview  → mide y reporta, nunca bloquea. Estado inicial obligatorio.
+# enforce  → bloquea Critical/High que cumplan las condiciones de abajo.
+mode: preview
+
+# Fecha en que el repo adoptó el gate. Los hallazgos anteriores a esta fecha
+# NO bloquean: los drena el proceso de gestión de vulnerabilidades con su SLA.
+#
+# Es la decisión que hace que el control sea adoptable. Encender enforce sobre
+# un repo con backlog histórico bloquea todos sus merges, el squad pide
+# apagarlo, y el control termina apagado con el costo político ya pagado.
+adopted_at: 2026-09-12
+
+# Severidades que bloquean. Medium y Low se reportan y entran al backlog con
+# su SLA, pero no frenan el trabajo diario.
+block_severities:
+  - CRITICAL
+  - HIGH
+
+# Un CVE sin parche disponible no es accionable dentro del PR que lo detecta.
+# Se reporta, no bloquea, y se gestiona por el playbook.
+ignore_unfixed: true
+
+# Vertical dueña del repo. Equivale a la GitHub Custom Property `team-vertical`
+# que el ruteo de notificaciones ya usa. Sin este dato el gate se queda en
+# preview: un control que no sabe a quién avisar no puede bloquear a nadie.
+vertical: appsec

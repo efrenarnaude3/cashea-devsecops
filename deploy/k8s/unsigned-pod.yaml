@@ -1,0 +1,39 @@
+# El Pod que NO tiene que poder correr. Es la mitad del demo que convierte la
+# política en evidencia.
+#
+# Usa una imagen pública legítima y perfectamente funcional. Ese es el punto:
+# no la rechaza por ser maliciosa, la rechaza porque no salió de nuestro
+# pipeline. Es la diferencia entre confiar en el contenido y confiar en la
+# procedencia.
+#
+# Rechazo esperado: la regla `solo-registry-autorizado` de
+# policy/verify-image-signature.yaml.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: imagen-no-autorizada
+  namespace: notes-api
+  labels:
+    app: demo-rechazo
+spec:
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: cualquiera
+      image: docker.io/library/nginx:1.27-alpine
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities:
+          drop: ["ALL"]
+      resources:
+        requests:
+          cpu: 10m
+          memory: 32Mi
+        limits:
+          cpu: 100m
+          memory: 64Mi

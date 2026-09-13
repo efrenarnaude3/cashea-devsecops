@@ -1,0 +1,96 @@
+# Control de admisión: el equivalente de Binary Authorization, en Kubernetes.
+#
+# Hace exactamente lo mismo que la política de Binary Authorization descrita en
+# terraform/modules/binary-authorization: antes de admitir un Pod, verifica que
+# la imagen haya sido firmada por el pipeline de este repo. Si no lo fue, el
+# API server la rechaza.
+#
+# Por qué esto importa más que el gate de CI: alguien con `kubectl` puede
+# saltarse el pipeline entero. El gate de CI protege el camino normal; esto
+# protege todos los demás.
+#
+# Los marcadores __GITHUB_OWNER__ y __GITHUB_REPO__ los reemplaza `make policy`
+# o `.\demo.ps1 policy` con los valores reales del repo.
+#
+# Probado con Kyverno 1.13.x. En 1.14 `validationFailureAction` se declara por
+# regla (`failureAction`); el comentario de abajo indica dónde cambiarlo.
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: heimdall-admission
+  annotations:
+    policies.kyverno.io/title: Solo corre lo que el pipeline firmó
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: critical
+    policies.kyverno.io/description: >-
+      Rechaza cualquier Pod cuya imagen no venga del registry autorizado o no
+      tenga una firma cosign emitida por el workflow ci-security.yml de este
+      repositorio.
+spec:
+  # En 1.14+: sacar esta línea y poner `failureAction: Enforce` en cada regla.
+  validationFailureAction: Enforce
+  background: false
+  webhookTimeoutSeconds: 30
+  # Si el webhook no puede decidir, no admite. Un control de admisión que
+  # falla abierto no es un control.
+  failurePolicy: Fail
+
+  rules:
+    # Regla 1: lista blanca de registries.
+    #
+    # Sin esta regla, la verificación de firma de la regla 2 solo evalúa las
+    # imágenes que matchean su patrón, y cualquier imagen de otro registry
+    # entraría sin ser mirada. Es el agujero clásico de las políticas de firma.
+    - name: solo-registry-autorizado
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - notes-api
+      validate:
+        message: >-
+          Imagen de un registry no autorizado. En este namespace solo corren
+          imágenes de ghcr.io/__GITHUB_OWNER__, que son las que produce el
+          pipeline.
+        pattern:
+          spec:
+            =(ephemeralContainers):
+              - image: "ghcr.io/__GITHUB_OWNER__/*"
+            =(initContainers):
+              - image: "ghcr.io/__GITHUB_OWNER__/*"
+            containers:
+              - image: "ghcr.io/__GITHUB_OWNER__/*"
+
+    # Regla 2: la firma tiene que existir y ser de este pipeline.
+    #
+    # keyless significa que no hay clave pública que distribuir ni rotar: la
+    # identidad del workflow, certificada por Sigstore y anotada en Rekor, es
+    # la prueba. `subject` ata la firma a este repositorio y a este workflow,
+    # así que una firma válida de OTRO repo no sirve.
+    - name: firma-del-pipeline
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - notes-api
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/__GITHUB_OWNER__/heimdall-notes-api*"
+          # Reescribe el tag al digest verificado: lo que queda corriendo en el
+          # clúster está pinneado a un digest inmutable, no a un tag mutable.
+          mutateDigest: true
+          verifyDigest: true
+          required: true
+          attestors:
+            - count: 1
+              entries:
+                - keyless:
+                    subject: "https://github.com/__GITHUB_OWNER__/__GITHUB_REPO__/.github/workflows/ci-security.yml@refs/heads/main"
+                    issuer: "https://token.actions.githubusercontent.com"
+                    rekor:
+                      url: https://rekor.sigstore.dev

@@ -1,0 +1,92 @@
+# Security as code sobre /terraform y sobre las políticas de Kyverno.
+#
+# El Terraform de este repo describe el camino en GCP (Cloud Run + Binary
+# Authorization) y NO se aplica en el demo: se valida y se escanea. Eso
+# igual tiene valor, porque `fmt`, `validate`, Checkov y tfsec corren sin
+# credenciales de GCP y encuentran lo que un `apply` encontraría tarde.
+
+name: iac-scan
+
+on:
+  push:
+    branches: [main]
+    paths: ["terraform/**", "policy/**", ".github/workflows/iac-scan.yml"]
+  pull_request:
+    branches: [main]
+    paths: ["terraform/**", "policy/**", ".github/workflows/iac-scan.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  terraform-validate:
+    name: fmt + validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+      - run: terraform -chdir=terraform fmt -check -recursive -diff
+      # -backend=false: para validar hacen falta los providers, no el state.
+      - run: terraform -chdir=terraform init -backend=false
+      - run: terraform -chdir=terraform validate
+
+  checkov:
+    name: Checkov
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install --no-cache-dir "checkov>=3.2,<4"
+      - name: Run Checkov
+        run: |
+          # --output-file-path espera un DIRECTORIO para las salidas a archivo;
+          # checkov escribe results_sarif.sarif adentro.
+          #
+          # No uso --soft-fail-on por severidad: las severidades vienen de la
+          # plataforma de Prisma Cloud, así que sin API key no matchean nada y
+          # el flag daría una falsa sensación de umbral. Las excepciones son
+          # --skip-check explícitos, revisables en un PR:
+          #
+          #   CKV_GCP_43  rotación de clave KMS: GCP no soporta rotación
+          #               automática en claves ASYMMETRIC_SIGN, y rotar la del
+          #               attestor invalida las attestations ya emitidas.
+          #   CKV_GCP_84  Artifact Registry con CMEK: no aplica a un registry
+          #               de imágenes públicas de demo.
+          checkov \
+            --directory terraform \
+            --framework terraform \
+            --skip-check CKV_GCP_43,CKV_GCP_84 \
+            --output cli --output sarif \
+            --output-file-path console,. \
+            --quiet
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: results_sarif.sarif
+          category: checkov
+
+  tfsec:
+    name: tfsec
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/tfsec-sarif-action@v0.1.4
+        with:
+          working_directory: terraform
+          sarif_file: tfsec.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: tfsec.sarif
+          category: tfsec
