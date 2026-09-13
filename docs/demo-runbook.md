@@ -1,7 +1,10 @@
 # Runbook del demo
 
-Doce minutos. Cada paso tiene el comando, lo que aparece en pantalla, y la frase
-que lo explica.
+Catorce minutos. Cada paso tiene el comando, lo que aparece en pantalla, y la
+frase que lo explica.
+
+El paso 5 es opcional y es el más fuerte. Si vas corto de tiempo, sacá la parte
+de la excepción caducada del paso 2 antes de sacar el paso 5.
 
 Toda la secuencia de este runbook está verificada de punta a punta en Windows 11
 con Docker Desktop, detrás de un gateway corporativo que intercepta TLS.
@@ -173,7 +176,59 @@ kubectl -n notes-api get pod -o jsonpath="{.items[0].spec.containers[0].image}"
 
 ---
 
-## Paso 5 — El mismo control en GCP (2 minutos)
+## Paso 5 — Subir la exigencia: de la firma al atestado (2 minutos)
+
+Este es el paso que conecta el demo local con Binary Authorization, y conviene
+introducirlo con la pregunta antes que con el comando:
+
+> Hasta acá verifiqué **una firma**, que prueba una sola cosa: que esta imagen
+> salió de mi pipeline. No dice que el pipeline la haya aprobado. Una imagen que
+> el gate bloqueó, si alguien la firma igual, pasa esta verificación.
+
+```powershell
+.\demo.ps1 attest -Owner efrenarnaude3 -Repo cashea-devsecops
+.\demo.ps1 deploy -Owner efrenarnaude3
+```
+
+> Ahora la política exige un **atestado**: un documento firmado por la misma
+> identidad que dice "el gate corrió en modo enforce, evaluó 99 hallazgos y no
+> dejó pasar ninguno bloqueante". La admisión no solo verifica quién firmó:
+> evalúa lo que dice.
+>
+> Eso permite exigir algo que una firma sola no puede: que el repositorio de
+> origen tuviera el gate **encendido**. Una imagen construida por este mismo
+> pipeline, con el mismo workflow y la misma identidad, pero con `mode: preview`
+> en su `gate.yaml`, queda perfectamente firmada — y no se admite.
+>
+> Binary Authorization funciona exactamente así. Su attestor no verifica firmas
+> de imágenes: es una identidad registrada cuyas occurrences de Container
+> Analysis la política exige antes de admitir. Esto es ese mecanismo.
+
+Mostrá el contenido del atestado, que está en el log del job
+`build-scan-gate-sign`, en el paso "Verificar el atestado del gate":
+
+```json
+{
+  "verdict": "pass",
+  "mode": "enforce",
+  "blocking": 0,
+  "evaluated": 99,
+  "adopted_at": "2026-09-12",
+  "vertical": "appsec",
+  "repository": "efrenarnaude3/cashea-devsecops",
+  "commit": "...",
+  "evaluated_at": "..."
+}
+```
+
+> **Cuidado con el orden.** La imagen tiene que venir de una corrida posterior a
+> que el atestado existiera. Si mostrás esto con una imagen vieja, la política
+> la rechaza con razón y el mensaje habla de un atestado que falta, no de una
+> firma inválida.
+
+---
+
+## Paso 6 — El mismo control en GCP (2 minutos)
 
 ```powershell
 terraform -chdir=terraform validate

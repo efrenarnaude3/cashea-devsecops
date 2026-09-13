@@ -41,6 +41,8 @@ El resto levanta el control de admisión en un clúster local:
 .\demo.ps1 deny                            # imagen no autorizada: RECHAZADA
 .\demo.ps1 deploy -Owner tu-usuario        # imagen firmada: admitida
 curl.exe http://localhost:8080/health
+
+.\demo.ps1 attest -Owner tu-usuario -Repo tu-repo   # sube la exigencia
 ```
 
 `-Preload` baja las imágenes con el Docker del host y las inyecta en el nodo, de

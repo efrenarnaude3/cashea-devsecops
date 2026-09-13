@@ -13,6 +13,8 @@
         .\demo.ps1 trust     Solo si la red intercepta TLS: le enseña a Kyverno
                              la CA del interceptor para que pueda verificar
         .\demo.ps1 policy    Aplica la política de admisión (firma + registry)
+        .\demo.ps1 attest    Sube la exigencia: además de la firma, pide el
+                             atestado firmado del veredicto del gate
         .\demo.ps1 deploy    Despliega la imagen firmada: la admite
         .\demo.ps1 deny      Intenta una imagen no autorizada: la rechaza
         .\demo.ps1 status    Qué hay corriendo y qué políticas están activas
@@ -36,7 +38,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('check', 'gate', 'up', 'trust', 'policy', 'deploy', 'deny', 'status', 'down', 'help')]
+    [ValidateSet('check', 'gate', 'up', 'trust', 'policy', 'attest', 'deploy', 'deny', 'status', 'down', 'help')]
     [string]$Command = 'help',
 
     [string]$Owner = $env:HEIMDALL_OWNER,
@@ -538,6 +540,29 @@ function Invoke-Policy {
     Write-Ok "Política activa. Solo se admiten imágenes de ghcr.io/$ownerValue firmadas por el workflow de $ownerValue/$Repo."
 }
 
+function Invoke-Attest {
+    # Enciende el control por atestación, encima del de firma. Va aparte de
+    # `policy` a propósito: son dos niveles de exigencia distintos y poder
+    # aplicarlos por separado es parte de mostrar cómo se adopta por etapas.
+    Write-Step 'Exigiendo la atestación del gate, además de la firma'
+    Assert-Tool 'kubectl' 'winget install Kubernetes.kubectl'
+    Assert-Cluster
+    Assert-Ready
+    $ownerValue = Resolve-Owner
+
+    $file = New-RenderedFile 'policy\require-gate-attestation.yaml' @{
+        '__GITHUB_OWNER__' = $ownerValue
+        '__GITHUB_REPO__'  = $Repo
+    } 'attestation-policy.yaml'
+
+    kubectl apply -f $file
+    if ($LASTEXITCODE -ne 0) { throw 'No pude aplicar la política de atestación.' }
+
+    Write-Ok 'Ahora no alcanza con que la imagen esté firmada: el pipeline tiene que haber declarado, y firmado, que el gate la aprobó en modo enforce.'
+    Write-Host '  La imagen a desplegar tiene que venir de una corrida POSTERIOR a este cambio,' -ForegroundColor DarkGray
+    Write-Host '  porque las anteriores no llevan el atestado.' -ForegroundColor DarkGray
+}
+
 function Invoke-Deploy {
     Write-Step 'Desplegando la imagen firmada'
     Assert-Tool 'kubectl' 'winget install Kubernetes.kubectl'
@@ -676,6 +701,7 @@ switch ($Command) {
     'up' { Invoke-Up }
     'trust' { Invoke-Trust }
     'policy' { Invoke-Policy }
+    'attest' { Invoke-Attest }
     'deploy' { Invoke-Deploy }
     'deny' { Invoke-Deny }
     'status' { Invoke-Status }

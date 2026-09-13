@@ -5,6 +5,42 @@ Cloud Run y Binary Authorization, y el Terraform está en `terraform/`. Este
 documento explica qué cambia, qué no, y el error que casi todo el mundo comete
 al implementarlo.
 
+## Qué está verificado y qué no
+
+Va primero y sin adornos, porque un repo de referencia que deja esto ambiguo
+hace perder tiempo a quien lo lee.
+
+| | Estado |
+|---|---|
+| Sintaxis y consistencia del Terraform (`fmt`, `validate`) | **Verificado en CI** |
+| Política de seguridad del IaC (Checkov, tfsec) | **Verificado en CI** |
+| El control de admisión, corriendo y rechazando | **Verificado**, sobre Kyverno en kind |
+| `terraform apply` sobre un proyecto real | **No ejecutado** |
+| Binary Authorization rechazando un deploy en Cloud Run | **No ejecutado** |
+
+`terraform apply` necesita un proyecto GCP con facturación activa, y este stack
+se escribió sin uno.
+
+**Aplicarlo en un proyecto personal tampoco habría probado gran cosa.** Un
+attestor y una policy en una cuenta ajena a la organización no dicen nada sobre
+cómo se comporta el control en el entorno de Cashea: ni las identidades, ni las
+políticas de la organización, ni el egress de red son los mismos. El lugar
+correcto para el primer `apply` es un proyecto sandbox de la organización, y eso
+es exactamente lo que el piloto pide en su primera semana.
+
+Lo que sí se puede afirmar hoy, y es la parte que importa: **el mecanismo está
+demostrado, incluido el que hace distinto a Binary Authorization**.
+
+`policy/require-gate-attestation.yaml` no verifica una firma: exige un
+**atestado** firmado por el pipeline que declare que el gate corrió en modo
+enforce y no dejó pasar nada bloqueante, y evalúa ese contenido antes de
+admitir. Esa es la forma exacta en que funciona Binary Authorization —una
+identidad registrada afirma algo sobre la imagen, la política exige esa
+afirmación—, y acá se ve corriendo.
+
+Lo que falta es trasladarlo del clúster local al proveedor, que es trabajo de
+configuración sobre un control ya probado, no una incógnita de diseño.
+
 ## Qué es equivalente y qué no
 
 | Pieza | En el demo (kind) | En GCP |
@@ -12,6 +48,7 @@ al implementarlo.
 | Runtime | Pod en kind | Cloud Run |
 | Registry | ghcr.io | Artifact Registry |
 | Firma | cosign keyless (Sigstore) | cosign keyless **más** attestation de Container Analysis |
+| Atestación del veredicto | Predicado in-toto firmado, verificado por Kyverno | Occurrence de Container Analysis firmada con KMS |
 | Admisión | Kyverno `verifyImages` | Binary Authorization |
 | Política | ClusterPolicy en el clúster | Policy a nivel proyecto |
 | Evidencia de rechazo | Evento del API server | Audit log de GCP |

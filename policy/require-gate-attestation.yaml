@@ -1,0 +1,107 @@
+# El equivalente real de Binary Authorization: admitir por ATESTACIÓN, no por
+# firma.
+#
+# La diferencia entre este archivo y verify-image-signature.yaml es la que más
+# se confunde al diseñar esta arquitectura, y vale la pena tenerla clara:
+#
+#   Una FIRMA prueba una sola cosa: que esta imagen salió de este pipeline.
+#   No dice si el pipeline la aprobó. Una imagen que el gate bloqueó, firmada
+#   igual por error o a mano, pasa cualquier verificación de firma.
+#
+#   Una ATESTACIÓN es una afirmación con contenido —"el gate corrió en modo
+#   enforce, evaluó 99 hallazgos y no dejó pasar ninguno bloqueante"— firmada
+#   por una identidad confiable. La admisión no solo verifica quién firmó:
+#   evalúa lo que dice.
+#
+# Binary Authorization funciona exactamente así. Su attestor no es un
+# verificador de firmas de imágenes: es una identidad registrada cuyas
+# occurrences de Container Analysis la política exige antes de admitir. Esta
+# política es ese mismo mecanismo, expresado con Kyverno y Sigstore.
+#
+# Lo que esto permite y una firma sola no: exigir que el repositorio de origen
+# tuviera el gate ENCENDIDO. Una imagen construida por este mismo pipeline, con
+# el mismo workflow y la misma identidad, pero con `mode: preview` en su
+# gate.yaml, queda perfectamente firmada — y esta política no la admite.
+#
+# Va en un archivo aparte a propósito. Es un control más exigente que se
+# enciende encima del otro, y poder aplicarlo o no aplicarlo por separado es
+# parte de mostrar cómo se adopta por etapas.
+#
+# Los marcadores __GITHUB_OWNER__ y __GITHUB_REPO__ los reemplaza
+# `.\demo.ps1 attest` con los valores reales del repo.
+
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: heimdall-gate-attestation
+  annotations:
+    policies.kyverno.io/title: Solo corre lo que el gate aprobó
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: critical
+    policies.kyverno.io/description: >-
+      Exige una atestación firmada por el pipeline que declare que el gate de
+      seguridad corrió en modo enforce y aprobó la imagen, sin hallazgos
+      bloqueantes. Es el equivalente de una política de Binary Authorization
+      que requiere la attestation de un attestor registrado.
+spec:
+  validationFailureAction: Enforce
+  background: false
+  webhookTimeoutSeconds: 30
+  failurePolicy: Fail
+
+  rules:
+    - name: veredicto-del-gate
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - notes-api
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/__GITHUB_OWNER__/heimdall-notes-api*"
+          # El digest lo pinea la otra política. Acá solo se evalúa el
+          # contenido del atestado: dos reglas mutando la misma referencia se
+          # pisan entre sí.
+          mutateDigest: false
+          verifyDigest: false
+          required: true
+          attestations:
+            # `type` es el predicateType del documento in-toto. En Kyverno 1.8 y
+            # anteriores este campo se llamaba `predicateType`; si alguien
+            # backportea esta política, es la línea que hay que cambiar.
+            - type: https://cashea.app/attestations/security-gate/v1
+              attestors:
+                - count: 1
+                  entries:
+                    # La misma identidad que firma la imagen firma el atestado.
+                    # Si fueran distintas, alguien con acceso a una de las dos
+                    # podría afirmar cosas sobre artefactos de la otra.
+                    - keyless:
+                        subject: "https://github.com/__GITHUB_OWNER__/__GITHUB_REPO__/.github/workflows/ci-security.yml@refs/heads/main"
+                        issuer: "https://token.actions.githubusercontent.com"
+                        rekor:
+                          url: https://rekor.sigstore.dev
+              # Las tres condiciones se evalúan sobre el predicado del atestado.
+              # Esto es lo que una verificación de firma no puede hacer.
+              conditions:
+                - all:
+                    # El gate dijo que sí.
+                    - key: "{{ verdict }}"
+                      operator: Equals
+                      value: pass
+
+                    # Y estaba encendido cuando lo dijo. Sin esta condición, un
+                    # repo en preview produciría atestados con verdict "pass"
+                    # que no significan nada: en preview el gate nunca bloquea.
+                    - key: "{{ mode }}"
+                      operator: Equals
+                      value: enforce
+
+                    # Y no dejó pasar nada bloqueante. Es redundante con
+                    # `verdict` hoy, y deja de serlo el día que alguien agregue
+                    # un modo intermedio: la condición sobrevive al cambio.
+                    - key: "{{ blocking }}"
+                      operator: Equals
+                      value: 0

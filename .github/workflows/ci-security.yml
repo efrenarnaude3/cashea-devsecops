@@ -346,6 +346,59 @@ jobs:
           DIGEST: ${{ steps.push.outputs.digest }}
         run: cosign attest --yes --predicate sbom.spdx.json --type spdxjson "${IMAGE}@${DIGEST}"
 
+      # El veredicto del gate, firmado y adjunto a la imagen.
+      #
+      # Esta es la pieza que hace que el control del clúster sea equivalente al
+      # de Binary Authorization, y no solo parecido.
+      #
+      # Una firma cosign prueba UNA cosa: que este pipeline produjo esta imagen.
+      # No dice nada sobre si el pipeline la aprobó. Un atestado es distinto: es
+      # una afirmación con contenido —"el gate corrió en modo enforce, evaluó 99
+      # hallazgos y no dejó ninguno bloqueante"— firmada por la misma identidad.
+      # Binary Authorization funciona exactamente así: una occurrence de
+      # Container Analysis firmada por un attestor registrado.
+      #
+      # Con esto, la política del clúster puede exigir algo que una firma sola
+      # no permite: que el repositorio de origen tuviera el gate ENCENDIDO. Una
+      # imagen construida por este mismo pipeline con el gate en preview queda
+      # firmada, y aun así no se admite.
+      #
+      # El predicado es chico a propósito. La lista completa de hallazgos vive
+      # en el artefacto gate-report.json; acá va solo lo que la admisión
+      # necesita evaluar.
+      - name: Atestar el veredicto del gate
+        if: steps.push.outcome == 'success'
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          jq -n \
+            --arg repository "${GITHUB_REPOSITORY}" \
+            --arg commit "${GITHUB_SHA}" \
+            --arg run_id "${GITHUB_RUN_ID}" \
+            --arg evaluated_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --slurpfile report gate-report.json \
+            '{
+              verdict: (if $report[0].exit_code == 0 then "pass" else "fail" end),
+              mode: $report[0].mode,
+              blocking: $report[0].blocking_count,
+              evaluated: $report[0].total_findings,
+              adopted_at: $report[0].adopted_at,
+              vertical: $report[0].vertical,
+              repository: $repository,
+              commit: $commit,
+              run_id: $run_id,
+              evaluated_at: $evaluated_at
+            }' > gate-verdict.json
+
+          echo "Veredicto que se va a firmar:"
+          cat gate-verdict.json
+
+          cosign attest --yes \
+            --predicate gate-verdict.json \
+            --type "https://cashea.app/attestations/security-gate/v1" \
+            "${IMAGE}@${DIGEST}"
+
       # Verifica con la identidad EXACTA que exige policy/verify-image-signature.yaml.
       # Con --certificate-identity-regexp sobre el repo entero, una firma
       # emitida por otro workflow pasaría acá y sería rechazada en el clúster:
@@ -360,6 +413,21 @@ jobs:
             --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci-security.yml@refs/heads/main" \
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             "${IMAGE}@${DIGEST}"
+
+      # Lo mismo para el atestado: verificarlo acá evita descubrir en el clúster
+      # que el predicado quedó mal formado o firmado por otra identidad.
+      - name: Verificar el atestado del gate
+        if: steps.push.outcome == 'success'
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          cosign verify-attestation \
+            --type "https://cashea.app/attestations/security-gate/v1" \
+            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ci-security.yml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${IMAGE}@${DIGEST}" \
+            | jq -r '.payload' | base64 -d | jq '.predicate'
 
       - uses: actions/upload-artifact@v4
         if: steps.push.outcome == 'success'
