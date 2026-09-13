@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Heimdall — driver del demo en Windows.
 
@@ -74,6 +74,27 @@ function Assert-Cluster {
     }
 }
 
+function Assert-Ready {
+    # Lo que `up` deja instalado: el CRD que hace válida a una ClusterPolicy y
+    # el namespace donde se despliega. Si falta alguno, todos los comandos que
+    # siguen fallan con un error que habla de otra cosa, y el demo se explica
+    # mal en vivo.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    kubectl get crd clusterpolicies.kyverno.io 2>&1 | Out-Null
+    $crd = $LASTEXITCODE
+    kubectl get namespace $script:Namespace 2>&1 | Out-Null
+    $ns = $LASTEXITCODE
+    $ErrorActionPreference = $previous
+
+    if ($crd -ne 0) {
+        throw "Kyverno no está instalado del todo (falta el CRD de ClusterPolicy). Volvé a correr: .\demo.ps1 up -Owner $script:Owner"
+    }
+    if ($ns -ne 0) {
+        throw "Falta el namespace '$script:Namespace'. Volvé a correr: .\demo.ps1 up -Owner $script:Owner"
+    }
+}
+
 function Resolve-Owner {
     if ([string]::IsNullOrWhiteSpace($script:Owner)) {
         throw "Falta el owner de GitHub. Pasalo con -Owner tu-usuario o seteá `$env:HEIMDALL_OWNER."
@@ -136,7 +157,15 @@ function Invoke-Up {
     Assert-Tool 'kind' 'choco install kind  (o https://kind.sigs.k8s.io)'
     Assert-Tool 'kubectl' 'choco install kubernetes-cli'
 
-    $existing = kind get clusters 2>$null
+    # `kind get clusters` escribe "No kind clusters found." a stderr cuando no
+    # hay ninguno, que es la situación normal la primera vez. Con
+    # ErrorActionPreference = 'Stop', PowerShell convierte esa línea en una
+    # excepción terminante y el script muere antes de crear nada.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $existing = @(kind get clusters 2>&1 | ForEach-Object { "$_".Trim() })
+    $ErrorActionPreference = $previous
+
     if ($existing -contains $ClusterName) {
         Write-Warn "El clúster ya existe, lo reuso."
     }
@@ -146,8 +175,33 @@ function Invoke-Up {
     }
 
     Write-Step "Instalando Kyverno $KyvernoVersion"
-    kubectl apply -f "https://github.com/kyverno/kyverno/releases/download/$KyvernoVersion/install.yaml"
+    # --server-side no es una optimización: sin eso la instalación NO entra.
+    #
+    # El `kubectl apply` clásico guarda una copia del manifiesto completo en la
+    # anotación kubectl.kubernetes.io/last-applied-configuration, para poder
+    # calcular el diff del próximo apply. Los CRDs de ClusterPolicy y Policy de
+    # Kyverno llevan el esquema entero con documentación y pesan más que el
+    # límite de 262144 bytes que Kubernetes impone a las anotaciones de un
+    # objeto. El error ("metadata.annotations: Too long") nunca menciona cuál es
+    # la anotación ni quién la escribió, y el resto del manifiesto sí se aplica:
+    # queda una instalación a medias, con los Deployments creados y dos CRDs
+    # faltando. Por eso el síntoma aparece recién más tarde, como
+    # 'no matches for kind "ClusterPolicy"'.
+    #
+    # Con server-side apply el estado deseado lo lleva el API server en
+    # managedFields y la anotación no se escribe.
+    #
+    # --force-conflicts cubre el caso de un intento previo: los objetos que ya
+    # entraron por client-side apply pertenecen a otro field manager y el
+    # server-side apply los reclamaría con un conflicto.
+    kubectl apply --server-side --force-conflicts -f "https://github.com/kyverno/kyverno/releases/download/$KyvernoVersion/install.yaml"
     if ($LASTEXITCODE -ne 0) { throw 'Falló la instalación de Kyverno.' }
+
+    # Un CRD aceptado todavía no es un CRD servido: el API server tiene que
+    # publicar el endpoint antes de que `kubectl apply` de una ClusterPolicy
+    # sepa a qué recurso corresponde.
+    kubectl wait --for=condition=Established crd/clusterpolicies.kyverno.io --timeout=120s
+    if ($LASTEXITCODE -ne 0) { throw 'El CRD de ClusterPolicy no quedó registrado.' }
 
     Write-Host '  Esperando a que Kyverno esté listo (puede tardar un par de minutos)...'
     # Primero los Deployments y después los Pods. `kubectl wait` sobre pods
@@ -167,6 +221,7 @@ function Invoke-Policy {
     Write-Step 'Aplicando la política de admisión'
     Assert-Tool 'kubectl' 'winget install Kubernetes.kubectl'
     Assert-Cluster
+    Assert-Ready
     $ownerValue = Resolve-Owner
 
     $file = New-RenderedFile 'policy\verify-image-signature.yaml' @{
@@ -183,13 +238,30 @@ function Invoke-Deploy {
     Write-Step 'Desplegando la imagen firmada'
     Assert-Tool 'kubectl' 'winget install Kubernetes.kubectl'
     Assert-Cluster
+    Assert-Ready
     $imageValue = Resolve-Image
     Write-Host "  Imagen: $imageValue"
 
     $file = New-RenderedFile 'deploy\k8s\deployment.yaml' @{ '__IMAGE__' = $imageValue } 'deployment.yaml'
-    kubectl apply -f $file
-    if ($LASTEXITCODE -ne 0) {
-        Write-Err 'El deploy fue rechazado. Si la imagen todavía no está firmada, es el control funcionando.'
+
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $output = kubectl apply -f $file 2>&1
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $previous
+    $output | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
+
+    if ($code -ne 0) {
+        # Mismo criterio que en Invoke-Deny, al revés: acá el rechazo es la mala
+        # noticia, y hay que saber si vino de la política (la firma no verifica)
+        # o de cualquier otra cosa.
+        $text = ($output | ForEach-Object { "$_" }) -join "`n"
+        if ($text -match 'admission webhook|kyverno|denied the request') {
+            Write-Err 'La política rechazó la imagen. Revisá que el package de ghcr sea público y que la firma corresponda al workflow configurado en policy/verify-image-signature.yaml.'
+        }
+        else {
+            Write-Err 'El apply falló por una causa ajena a la política. El mensaje de arriba dice cuál.'
+        }
         return
     }
     kubectl apply -f (Join-Path $root 'deploy\k8s\service.yaml')
@@ -205,6 +277,7 @@ function Invoke-Deny {
     Write-Step 'Intentando desplegar una imagen que el pipeline no produjo'
     Assert-Tool 'kubectl' 'winget install Kubernetes.kubectl'
     Assert-Cluster
+    Assert-Ready
     Write-Host '  Imagen: docker.io/library/nginx:1.27-alpine (legítima, pero de otro registry)'
     Write-Host ''
 
@@ -221,22 +294,44 @@ function Invoke-Deny {
     $output | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
     Write-Host ''
 
-    if ($code -ne 0) {
+    if ($code -eq 0) {
+        Write-Err 'El Pod fue admitido: la política no está activa. Corré `.\demo.ps1 policy` antes.'
+        return
+    }
+
+    # Un exit code distinto de cero NO alcanza como prueba de que el control
+    # actuó. `kubectl apply` también falla si el namespace no existe, si el YAML
+    # está mal formado o si el clúster no responde, y cantar "rechazado por la
+    # política" en esos casos es demostrar un control que no intervino. En una
+    # demo frente al equipo de seguridad, ese falso positivo es peor que el
+    # error: el error se arregla, la afirmación falsa se cree.
+    #
+    # Kyverno rechaza a través de un ValidatingWebhookConfiguration, así que su
+    # negativa siempre llega como "admission webhook ... denied the request".
+    $text = ($output | ForEach-Object { "$_" }) -join "`n"
+    if ($text -match 'admission webhook|kyverno|denied the request') {
         Write-Ok 'RECHAZADO por el control de admisión. Esto es el equivalente exacto de lo que Binary Authorization hace en Cloud Run.'
     }
     else {
-        Write-Err 'El Pod fue admitido: la política no está activa. Corré `.\demo.ps1 policy` antes.'
+        Write-Err 'El apply falló, pero NO fue la política: el mensaje de arriba dice la causa real. Hasta que ahí diga "admission webhook ... denied the request", el control no quedó demostrado.'
     }
 }
 
 function Invoke-Status {
     Write-Step 'Estado del demo'
-    kubectl get clusterpolicies.kyverno.io 2>$null
+    # Mismo motivo que en Invoke-Up: cualquier mensaje a stderr de kubectl
+    # sería una excepción terminante y el estado nunca se mostraría.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+
+    kubectl get clusterpolicies.kyverno.io 2>&1
     Write-Host ''
-    kubectl get pods -n $Namespace 2>$null
+    kubectl get pods -n $Namespace 2>&1
     Write-Host ''
     Write-Host 'Últimos eventos del namespace:' -ForegroundColor DarkGray
-    kubectl get events -n $Namespace --sort-by=.lastTimestamp 2>$null | Select-Object -Last 10
+    kubectl get events -n $Namespace --sort-by=.lastTimestamp 2>&1 | Select-Object -Last 10
+
+    $ErrorActionPreference = $previous
 }
 
 function Invoke-Down {
