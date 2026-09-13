@@ -45,7 +45,15 @@ jobs:
         with:
           python-version: "3.11"
       - run: pip install --no-cache-dir "checkov>=3.2,<4"
+
+      # continue-on-error acá y un paso explícito de falla al final. Son dos
+      # cosas distintas que antes estaban mezcladas: que Checkov encuentre
+      # findings (y por eso salga distinto de cero) no debería impedir que su
+      # reporte se suba. Sin esta separación, el hallazgo se pierde justo
+      # cuando más se necesita verlo.
       - name: Run Checkov
+        id: checkov
+        continue-on-error: true
         run: |
           # --output-file-path espera un DIRECTORIO para las salidas a archivo;
           # checkov escribe results_sarif.sarif adentro.
@@ -60,18 +68,32 @@ jobs:
           #               attestor invalida las attestations ya emitidas.
           #   CKV_GCP_84  Artifact Registry con CMEK: no aplica a un registry
           #               de imágenes públicas de demo.
+          mkdir -p checkov-out
           checkov \
             --directory terraform \
             --framework terraform \
             --skip-check CKV_GCP_43,CKV_GCP_84 \
             --output cli --output sarif \
-            --output-file-path console,. \
-            --quiet
-      - uses: github/codeql-action/upload-sarif@v3
+            --output-file-path console,checkov-out \
+            --compact
+
+      - name: Qué archivos dejó Checkov
         if: always()
+        run: ls -la checkov-out || echo "checkov-out no existe"
+
+      # El upload solo corre si el SARIF existe de verdad. Antes fallaba con
+      # "Path does not exist" y ese error tapaba el resultado real del scan.
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('checkov-out/results_sarif.sarif') != ''
         with:
-          sarif_file: results_sarif.sarif
+          sarif_file: checkov-out/results_sarif.sarif
           category: checkov
+
+      - name: El gate de IaC falla si Checkov encontró algo
+        if: steps.checkov.outcome == 'failure'
+        run: |
+          echo "Checkov encontró incumplimientos de política. El detalle está arriba, en 'Run Checkov'."
+          exit 1
 
   tfsec:
     name: tfsec

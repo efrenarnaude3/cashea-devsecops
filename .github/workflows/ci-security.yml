@@ -32,6 +32,22 @@ env:
   PYTHON_VERSION: "3.11"
   IMAGE_NAME: heimdall-notes-api
 
+# Sobre `aquasecurity/trivy-action@0.35.0`, que aparece cuatro veces abajo:
+# la versión es deliberada, no es "la última".
+#
+# En marzo de 2026 un atacante con credenciales robadas force-pusheó 76 de los
+# 77 tags de ese repositorio apuntando a malware que robaba credenciales del
+# runner. 0.35.0 fue la única release que sobrevivió intacta, porque estaba
+# protegida por immutable releases de GitHub:
+# https://github.com/aquasecurity/trivy/security/advisories/GHSA-69fq-xp46-6x23
+#
+# Un tag de git es mutable, y eso fue justamente la demostración. El siguiente
+# paso de endurecimiento es pinear por SHA de commit, que no se puede
+# reescribir: `uses: aquasecurity/trivy-action@<sha de 40 caracteres>`.
+#
+# No se puede usar una variable acá: `uses:` no acepta expresiones, así que la
+# versión se repite en cada paso y cambiarla es un find-and-replace.
+
 jobs:
   quality:
     name: Lint, tipos, tests y self-test del gate
@@ -112,7 +128,7 @@ jobs:
           path: npm-audit-toolchain.json
           if-no-files-found: warn
       - name: Trivy filesystem (SARIF para la pestaña Security)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: fs
           scan-ref: service
@@ -126,7 +142,7 @@ jobs:
           sarif_file: trivy-fs.sarif
           category: trivy-fs
       - name: Trivy filesystem (JSON para el gate)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           scan-type: fs
           scan-ref: service
@@ -204,7 +220,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Trivy sobre la imagen (JSON para el gate)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ steps.meta.outputs.image }}:${{ github.sha }}
           severity: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
@@ -213,7 +229,7 @@ jobs:
           output: trivy-image.json
 
       - name: Trivy sobre la imagen (SARIF para la pestaña Security)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@0.35.0
         with:
           image-ref: ${{ steps.meta.outputs.image }}:${{ github.sha }}
           severity: MEDIUM,HIGH,CRITICAL
