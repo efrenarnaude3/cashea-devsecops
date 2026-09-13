@@ -232,16 +232,27 @@ function Import-Images([string]$manifestText) {
             # Se copia el tar al nodo en vez de pipearlo porque PowerShell 5.1 no
             # tiene redirección de entrada (`<`), y pipear binario por el
             # pipeline de PowerShell corrompe los bytes.
+            #
+            # El destino es /var/tmp y NO /tmp. kind crea los nodos con un tmpfs
+            # montado sobre /tmp; `docker cp` escribe en la capa de abajo del
+            # contenedor, que el montaje tapa, así que el copy dice
+            # "Successfully copied" y el archivo no existe para nadie más:
+            #
+            #   Successfully copied 52.3MB to heimdall-control-plane:/tmp/...
+            #   ctr: open /tmp/image-load.tar: no such file or directory
+            #
+            # Las dos líneas son ciertas a la vez. /var/tmp no tiene tmpfs
+            # encima.
             docker save $image -o $tar
             if ($LASTEXITCODE -ne 0) { throw "No pude exportar $image." }
 
-            docker cp $tar "${node}:/tmp/image-load.tar"
+            docker cp $tar "${node}:/var/tmp/image-load.tar"
             if ($LASTEXITCODE -ne 0) { throw "No pude copiar la imagen al nodo." }
 
-            docker exec $node ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs /tmp/image-load.tar
+            docker exec $node ctr --namespace=k8s.io images import --digests --snapshotter=overlayfs /var/tmp/image-load.tar
             if ($LASTEXITCODE -ne 0) { throw "No pude importar $image en el containerd del nodo." }
 
-            docker exec $node rm -f /tmp/image-load.tar | Out-Null
+            docker exec $node rm -f /var/tmp/image-load.tar | Out-Null
             Remove-Item $tar -Force -ErrorAction SilentlyContinue
         }
     }
