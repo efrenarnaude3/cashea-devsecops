@@ -10,6 +10,8 @@
         .\demo.ps1 gate      El gate decide sobre hallazgos de ejemplo
         .\demo.ps1 up        Crea el clúster kind e instala Kyverno
                              Agregá -Preload si la red intercepta TLS
+        .\demo.ps1 trust     Solo si la red intercepta TLS: le enseña a Kyverno
+                             la CA del interceptor para que pueda verificar
         .\demo.ps1 policy    Aplica la política de admisión (firma + registry)
         .\demo.ps1 deploy    Despliega la imagen firmada: la admite
         .\demo.ps1 deny      Intenta una imagen no autorizada: la rechaza
@@ -34,7 +36,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('check', 'gate', 'up', 'policy', 'deploy', 'deny', 'status', 'down', 'help')]
+    [ValidateSet('check', 'gate', 'up', 'trust', 'policy', 'deploy', 'deny', 'status', 'down', 'help')]
     [string]$Command = 'help',
 
     [string]$Owner = $env:HEIMDALL_OWNER,
@@ -375,6 +377,108 @@ function Invoke-Up {
     Write-Ok 'Clúster listo, Kyverno corriendo y namespace creado.'
 }
 
+function Invoke-Trust {
+    # Hace que Kyverno confíe en la CA que está interceptando TLS en esta red.
+    #
+    # Sin esto, la verificación keyless no puede ni empezar: cosign arranca
+    # bajando las raíces de confianza de Sigstore desde tuf-repo-cdn.sigstore.dev
+    # y esa conexión, como todas, llega re-firmada por el proxy. El pod de
+    # Kyverno tiene el bundle de certificados de su imagen, que no conoce esa CA,
+    # así que corta antes de tocar el registry.
+    #
+    # ES UNA DECISIÓN DE SEGURIDAD, no un detalle de configuración: instalar la
+    # CA del interceptor es declarar que se confía en el interceptor. Para un
+    # clúster local, efímero y de demo, es aceptable y es lo que hace cualquier
+    # equipo de plataforma en una red corporativa. En un clúster productivo, la
+    # misma acción significa que un tercero puede leer y reescribir el tráfico
+    # TLS de los workloads, y eso se discute antes de hacerlo, no después.
+    Write-Step 'Enseñándole a Kyverno la CA que intercepta TLS en esta red'
+    Assert-Cluster
+
+    # La CA sale de la propia conexión, no de una ruta escrita a mano: se abre un
+    # TLS contra un host cualquiera, se arma la cadena y se toma la raíz. Así
+    # funciona con cualquier proxy, sin saber de antemano cuál es.
+    $probe = 'ghcr.io'
+    $client = New-Object System.Net.Sockets.TcpClient($probe, 443)
+    try {
+        $stream = New-Object System.Net.Security.SslStream($client.GetStream(), $false, { $true })
+        $stream.AuthenticateAsClient($probe)
+        $leaf = [System.Security.Cryptography.X509Certificates.X509Certificate2]$stream.RemoteCertificate
+    }
+    finally {
+        $client.Close()
+    }
+
+    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
+    $chain.ChainPolicy.RevocationMode = 'NoCheck'
+    [void]$chain.Build($leaf)
+    $root = $chain.ChainElements[$chain.ChainElements.Count - 1].Certificate
+
+    Write-Host "  Raíz de la cadena hacia ${probe}:" -ForegroundColor DarkGray
+    Write-Host "    $($root.Subject)" -ForegroundColor DarkGray
+
+    $pem = "-----BEGIN CERTIFICATE-----`n" +
+    [Convert]::ToBase64String($root.RawData, 'InsertLineBreaks') +
+    "`n-----END CERTIFICATE-----`n"
+
+    # El bundle tiene que ser COMPLETO: montarlo reemplaza el archivo de la
+    # imagen, así que si solo lleva la CA corporativa, Kyverno deja de confiar en
+    # todo lo demás. Se parte del bundle del nodo y se le agrega la raíz.
+    $node = "$ClusterName-control-plane"
+    $bundle = Join-Path $rendered 'ca-certificates.crt'
+
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $base = docker exec $node cat /etc/ssl/certs/ca-certificates.crt 2>&1
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = $previous
+    if ($code -ne 0) { throw 'No pude leer el bundle de certificados del nodo.' }
+
+    $text = (($base | ForEach-Object { "$_" }) -join "`n") + "`n" + $pem
+    [System.IO.File]::WriteAllText($bundle, $text, (New-Object System.Text.UTF8Encoding($false)))
+
+    kubectl -n kyverno delete configmap kyverno-ca-bundle --ignore-not-found | Out-Null
+    kubectl -n kyverno create configmap kyverno-ca-bundle --from-file=ca-certificates.crt=$bundle
+    if ($LASTEXITCODE -ne 0) { throw 'No pude crear el ConfigMap con el bundle.' }
+
+    # El nombre del contenedor se lee del Deployment en vez de asumirlo. Un
+    # strategic merge patch con un nombre que no existe no falla: agrega un
+    # contenedor nuevo, y el Deployment queda roto de una forma difícil de ver.
+    $container = kubectl -n kyverno get deployment kyverno-admission-controller -o jsonpath='{.spec.template.spec.containers[0].name}'
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($container)) {
+        throw 'No pude leer el nombre del contenedor de Kyverno.'
+    }
+    Write-Host "  Parcheando el contenedor '$container'" -ForegroundColor DarkGray
+
+    $patch = @"
+spec:
+  template:
+    spec:
+      volumes:
+        - name: corp-ca
+          configMap:
+            name: kyverno-ca-bundle
+      containers:
+        - name: $container
+          volumeMounts:
+            - name: corp-ca
+              mountPath: /etc/ssl/certs/ca-certificates.crt
+              subPath: ca-certificates.crt
+              readOnly: true
+"@
+    $patchFile = Join-Path $rendered 'kyverno-ca-patch.yaml'
+    [System.IO.File]::WriteAllText($patchFile, $patch, (New-Object System.Text.UTF8Encoding($false)))
+
+    kubectl -n kyverno patch deployment kyverno-admission-controller --type=merge --patch-file $patchFile
+    if ($LASTEXITCODE -ne 0) { throw 'No pude parchear el deployment de Kyverno.' }
+
+    Write-Host '  Esperando a que Kyverno vuelva a levantar...'
+    kubectl -n kyverno rollout status deployment/kyverno-admission-controller --timeout=180s
+    if ($LASTEXITCODE -ne 0) { throw 'Kyverno no volvió a estar listo después del parche.' }
+
+    Write-Ok 'Kyverno ya puede validar la cadena TLS de esta red. Volvé a correr: .\demo.ps1 deploy'
+}
+
 function Invoke-Policy {
     Write-Step 'Aplicando la política de admisión'
     Assert-Tool 'kubectl' 'winget install Kubernetes.kubectl'
@@ -507,6 +611,7 @@ switch ($Command) {
     'check' { Invoke-Check }
     'gate' { Invoke-Gate }
     'up' { Invoke-Up }
+    'trust' { Invoke-Trust }
     'policy' { Invoke-Policy }
     'deploy' { Invoke-Deploy }
     'deny' { Invoke-Deny }
