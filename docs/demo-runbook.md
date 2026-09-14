@@ -226,6 +226,38 @@ Mostrá el contenido del atestado, que está en el log del job
 > la rechaza con razón y el mensaje habla de un atestado que falta, no de una
 > firma inválida.
 
+### La prueba de que el control no es decorativo
+
+Este es el remate, y conviene plantearlo como la pregunta que un CISO se hace:
+
+> Acabás de ver que admite. ¿Cómo sabés que rechaza? Una regla de verificación
+> mal escrita pasa siempre, y desde afuera se ve idéntica a una que funciona.
+
+```powershell
+.\demo.ps1 attest-negativo -Owner efrenarnaude3 -Repo cashea-devsecops
+kubectl -n notes-api delete deployment notes-api
+.\demo.ps1 deploy -Owner efrenarnaude3
+```
+
+Misma imagen, misma firma, el atestado real sigue en el registry. Lo único que
+cambia es que la política exige un predicateType que nadie emitió:
+
+```
+autogen-veredicto-del-gate: 'image attestations verification failed,
+verifiedCount: 0, requiredCount: 1, error: attestions not found for
+predicate type https://cashea.app/attestations/NO-EXISTE/v1'
+```
+
+> Todo control de seguridad debería tener su prueba negativa escrita, y casi
+> ninguno la tiene. Sin esto, "la política está aplicada" y "la política
+> funciona" son dos afirmaciones distintas, y solo una se puede demostrar.
+
+Dejalo como estaba antes de seguir:
+
+```powershell
+.\demo.ps1 attest -Owner efrenarnaude3 -Repo cashea-devsecops
+```
+
 ---
 
 ## Paso 6 — El mismo control en GCP (2 minutos)
