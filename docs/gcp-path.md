@@ -41,6 +41,11 @@ afirmación—, y acá se ve corriendo.
 Lo que falta es trasladarlo del clúster local al proveedor, que es trabajo de
 configuración sobre un control ya probado, no una incógnita de diseño.
 
+Para quien quiera correr el `apply` sin una cuenta de facturación, el camino por
+un proyecto temporal está en [`gcp-lab.md`](gcp-lab.md). Sirve para quitarle el
+riesgo técnico al `apply`; no reemplaza al sandbox de la organización, porque un
+proyecto de laboratorio no tiene sus identidades, sus políticas ni su red.
+
 ## Qué es equivalente y qué no
 
 | Pieza | En el demo (kind) | En GCP |
