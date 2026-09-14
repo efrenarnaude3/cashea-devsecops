@@ -66,7 +66,31 @@ spec:
           # pisan entre sí.
           mutateDigest: false
           verifyDigest: false
-          required: true
+
+          # required: false, y la razón es sutil pero importante, porque es la
+          # única forma en que dos políticas de verificación conviven sobre la
+          # misma imagen.
+          #
+          # `required: true` no es lo que hace cumplir esta regla. Lo que la
+          # hace cumplir es la verificación del atestado y sus condiciones: si
+          # el atestado falta o el veredicto no coincide, la regla falla igual.
+          # `required` dispara un chequeo ADICIONAL al final: que toda imagen
+          # del recurso figure en la lista de imágenes verificadas que Kyverno
+          # arma durante la fase de mutación.
+          #
+          # Y ahí está el choque. La otra política reescribe la referencia de
+          # `:latest` al digest verificado, así que cuando esta regla hace su
+          # chequeo final, el recurso ya dice `@sha256:...` mientras que la
+          # lista de verificadas guarda `:latest`. No coinciden como strings, y
+          # el resultado es un rechazo que dice "unverified image" sobre una
+          # imagen que la línea anterior del log declaró verificada:
+          #
+          #   image attestations verification succeeded  verifiedCount=1
+          #   validation failed  failed rules=["autogen-veredicto-del-gate"]
+          #
+          # Es el tipo de falla que se diagnostica leyendo el log del motor, no
+          # el mensaje del webhook: los dos son ciertos y dicen cosas opuestas.
+          required: false
           attestations:
             # `type` es el predicateType del documento in-toto. En Kyverno 1.8 y
             # anteriores este campo se llamaba `predicateType`; si alguien

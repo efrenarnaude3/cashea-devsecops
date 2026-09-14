@@ -38,7 +38,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('check', 'gate', 'up', 'trust', 'policy', 'attest', 'deploy', 'deny', 'status', 'down', 'help')]
+    [ValidateSet('check', 'gate', 'up', 'trust', 'policy', 'attest', 'attest-negativo', 'deploy', 'deny', 'status', 'down', 'help')]
     [string]$Command = 'help',
 
     [string]$Owner = $env:HEIMDALL_OWNER,
@@ -561,6 +561,37 @@ function Invoke-Attest {
     Write-Ok 'Ahora no alcanza con que la imagen esté firmada: el pipeline tiene que haber declarado, y firmado, que el gate la aprobó en modo enforce.'
     Write-Host '  La imagen a desplegar tiene que venir de una corrida POSTERIOR a este cambio,' -ForegroundColor DarkGray
     Write-Host '  porque las anteriores no llevan el atestado.' -ForegroundColor DarkGray
+    Write-Host '  Para probar que el control no es decorativo: .\demo.ps1 attest-negativo' -ForegroundColor DarkGray
+}
+
+function Invoke-AttestNegative {
+    # La prueba de que el control por atestación hace algo.
+    #
+    # Una regla de verificación mal escrita puede pasar SIEMPRE, y desde afuera
+    # se ve igual que una que funciona: el Pod se admite en los dos casos. La
+    # única forma de distinguirlas es pedirle algo que no exista y confirmar que
+    # rechaza.
+    #
+    # Acá se aplica la misma política con un predicateType inventado. La imagen
+    # es la misma, la firma es la misma, el atestado real sigue estando: lo
+    # único que cambia es que se exige un atestado que nadie emitió.
+    Write-Step 'Prueba negativa: exigir un atestado que no existe'
+    Assert-Tool 'kubectl' 'winget install Kubernetes.kubectl'
+    Assert-Cluster
+    Assert-Ready
+    $ownerValue = Resolve-Owner
+
+    $file = New-RenderedFile 'policy\require-gate-attestation.yaml' @{
+        '__GITHUB_OWNER__'                                  = $ownerValue
+        '__GITHUB_REPO__'                                   = $Repo
+        'https://cashea.app/attestations/security-gate/v1'  = 'https://cashea.app/attestations/NO-EXISTE/v1'
+    } 'attestation-policy-negativa.yaml'
+
+    kubectl apply -f $file
+    if ($LASTEXITCODE -ne 0) { throw 'No pude aplicar la política de prueba.' }
+
+    Write-Host '  Política modificada. Ahora el deploy TIENE que ser rechazado.' -ForegroundColor DarkGray
+    Write-Host '  Cuando termines, volvé a la buena con: .\demo.ps1 attest' -ForegroundColor DarkGray
 }
 
 function Invoke-Deploy {
@@ -702,6 +733,7 @@ switch ($Command) {
     'trust' { Invoke-Trust }
     'policy' { Invoke-Policy }
     'attest' { Invoke-Attest }
+    'attest-negativo' { Invoke-AttestNegative }
     'deploy' { Invoke-Deploy }
     'deny' { Invoke-Deny }
     'status' { Invoke-Status }
